@@ -47,6 +47,33 @@ That's the whole minimum config. With no `target:`, it follows the
 DHCP-supplied default gateway, so the same block works unmodified on every
 VLAN and re-targets itself if the lease changes.
 
+### Pin `refresh: always` while iterating
+
+ESPHome caches an `external_components` clone for a day by default, **and each
+build environment keeps its own cache**. If you build from more than one place
+— a local add-on and a remote/CI builder, say — they can be serving different
+versions of this component at the same time, with no warning beyond a quiet
+`Skipping update for ...` line in the log.
+
+That bites hardest right after an upgrade. A stale clone predating Ethernet
+support will fail validation with:
+
+```
+Component gateway_watchdog requires component wifi.
+```
+
+on an Ethernet node, even though the current component has no such dependency.
+Either add `refresh: always`:
+
+```yaml
+external_components:
+  - source: github://davidcoulson/esphome-gateway-watchdog
+    components: [gateway_watchdog]
+    refresh: always
+```
+
+or clear the cache for that build host (`.esphome/external_components/`).
+
 ## Configuration
 
 ```yaml
