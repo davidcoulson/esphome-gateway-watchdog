@@ -132,18 +132,64 @@ Ethernet nodes are the strongest case for it: they have no `wifi` component,
 so `wifi.reboot_timeout` does not exist for them and they otherwise have no
 link-layer watchdog at all.
 
+## Attributing the reboot
+
+You do not need to configure anything for this. ESPHome's `debug` component
+already records which component asked for a reboot, and this one is picked up
+automatically:
+
+`App.safe_reboot()` runs the shutdown hooks without reassigning
+`current_component_`, so it still points at this component (the scheduler set
+it before dispatching our `loop()`). `DebugComponent::on_shutdown()` persists
+that source to NVS, and on the next boot an `ESP_RST_SW` reset with a loadable
+preference is reported as `Reboot request from <source>`.
+
+So with a `debug` reset-reason sensor configured:
+
+```yaml
+text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset Reason"
+```
+
+a watchdog reboot reads:
+
+```
+Reset Reason: Reboot request from gateway_watchdog
+```
+
+which distinguishes it from `Reboot request from esphome.ota`, a Restart
+button, `api.reboot_timeout`, a power cycle or a panic.
+
 ## Verified
 
-Tested on an ESP32-C3 against ESPHome 2026.8.2 / ESP-IDF 6.1.0:
+Tested on ESP32-C3 hardware against ESPHome 2026.8.2 / ESP-IDF 6.1.0, and
+built for ESP32 Ethernet (W5500 / LAN8720) nodes.
 
-- Auto-discovered the DHCP gateway and reported 0.0% loss with 4–16 ms RTT.
-- With `target: 192.0.2.1` (RFC 5737 TEST-NET-1, unroutable) and `reboot: true`,
-  reported 100.0% loss and `NaN` RTT and **stayed up** across many multiples of
-  `reboot_window`, confirming safety property 1 on real hardware.
+**Normal operation** — auto-discovered the DHCP gateway, reported 0.0% loss at
+4–16 ms RTT.
 
-The reboot path itself — a target that is reachable and then stops being
-reachable — has not been exercised end-to-end on hardware; it is the same code
-path as the unreachable case past the `armed_` guard.
+**No reboot loop on an unreachable target** — with `target: 192.0.2.1`
+(RFC 5737 TEST-NET-1, unroutable) and `reboot: true`, reported 100.0% loss and
+`NaN` RTT and **stayed up** across many multiples of `reboot_window`,
+confirming safety property 1.
+
+**The reboot path** — pointed one node at a second node, let it arm, then
+rebooted the target to create a real outage:
+
+```
+[15:01:29][S][sensor]: 'GW Packet Loss' >> 22.2 %
+[15:01:30][E][gateway_watchdog:160]: gateway unreachable 5008 ms - rebooting
+[15:01:30][I][app:271]: Rebooting safely
+[15:01:30][D][debug:058]: Storing reboot source: gateway_watchdog
+```
+
+and after the reboot the device reported:
+
+```
+Reset Reason: Reboot request from gateway_watchdog
+```
 
 ## License
 
