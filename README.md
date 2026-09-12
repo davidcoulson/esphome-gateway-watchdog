@@ -123,6 +123,15 @@ ESP32 family on the ESP-IDF framework. Uses ESP-IDF's `esp_ping`
 (`lwip/apps/ping/ping_sock.h`) and `esp_netif`. Not supported on ESP8266 or
 under the Arduino framework.
 
+Works on **WiFi and Ethernet** nodes. It depends on `network` rather than
+`wifi`, resolves the gateway from `esp_netif_get_default_netif()` (whichever
+interface currently holds the default route) rather than a hardcoded
+`WIFI_STA_DEF` key, and uses `network::is_connected()` for link state.
+
+Ethernet nodes are the strongest case for it: they have no `wifi` component,
+so `wifi.reboot_timeout` does not exist for them and they otherwise have no
+link-layer watchdog at all.
+
 ## Verified
 
 Tested on an ESP32-C3 against ESPHome 2026.8.2 / ESP-IDF 6.1.0:

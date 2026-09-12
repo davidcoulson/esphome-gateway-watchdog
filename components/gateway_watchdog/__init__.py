@@ -1,5 +1,9 @@
 """Gateway reachability watchdog for ESPHome.
 
+Works on both WiFi and Ethernet nodes: it depends on ``network`` rather
+than ``wifi``, resolves the gateway from whichever netif is currently the
+default route, and uses ``network::is_connected()`` for link state.
+
 See README.md for the rationale; the short version is that ESPHome's
 ``wifi: reboot_timeout:`` is an *association* watchdog, not a
 *reachability* one, so a node that stays associated to its AP while its
@@ -11,7 +15,7 @@ import esphome.config_validation as cv
 from esphome.const import CONF_ID
 
 CODEOWNERS = ["@davidcoulson"]
-DEPENDENCIES = ["wifi"]
+DEPENDENCIES = ["network"]
 MULTI_CONF = False
 
 gateway_watchdog_ns = cg.esphome_ns.namespace("gateway_watchdog")

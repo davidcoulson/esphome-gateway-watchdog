@@ -7,7 +7,7 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
-#include "esphome/components/wifi/wifi_component.h"
+#include "esphome/components/network/util.h"
 
 #include "esp_netif.h"
 
@@ -51,7 +51,12 @@ uint32_t GatewayWatchdog::resolve_target_() {
   }
   // No explicit target: follow the DHCP-supplied default gateway, so the
   // same config works on every VLAN and re-targets if the lease changes.
-  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  //
+  // esp_netif_get_default_netif() rather than a hardcoded "WIFI_STA_DEF"
+  // key: that key does not exist on an Ethernet-only node, and asking for
+  // the current default route is the right question on a node that has
+  // both. Returns whichever interface actually carries the default route.
+  esp_netif_t *netif = esp_netif_get_default_netif();
   if (netif == nullptr)
     return 0;
   esp_netif_ip_info_t info;
@@ -124,9 +129,10 @@ void GatewayWatchdog::loop() {
   }
   this->last_loop_ms_ = now;
 
-  // Disassociation is wifi.reboot_timeout's job. Overlapping the two
-  // would only make the reboot reason ambiguous.
-  if (!wifi::global_wifi_component->is_connected()) {
+  // A down link is the network component's own problem (and, on WiFi,
+  // wifi.reboot_timeout's). Overlapping them would only make the reboot
+  // reason ambiguous. network::is_connected() covers WiFi and Ethernet.
+  if (!network::is_connected()) {
     this->last_reply_ms_ = now;
     return;
   }
