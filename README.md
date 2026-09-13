@@ -118,6 +118,18 @@ The config is rejected at build time if:
 This component can power-cycle whatever the node is wired into, so each of
 these is deliberate:
 
+0. **Distinguishes a dead session from an unreachable gateway.** A live
+   `esp_ping` session emits a callback every interval — a reply *or* a
+   timeout. Timeouts arriving means the gateway is not answering, which is
+   real signal. Total silence means the session itself has stopped (socket
+   error, netif rebuilt by a reconnect), which is not the network's fault, so
+   the session is rebuilt rather than the node rebooted. Without this, a dead
+   session freezes the "last reply" timestamp and guarantees a reboot every
+   window, forever.
+0b. **Rebuilds once before ever rebooting.** Even when the session looks
+   alive, the first expired window rebuilds it and starts a fresh window
+   instead of rebooting. Only a second full window — on a session created
+   after the node had reached the gateway again — actually reboots.
 1. **Never reboots on a target it has never once reached.** A node that has
    never seen its gateway — wrong VLAN, bad credentials, a config flashed to the
    wrong device — logs and stays up rather than entering a reboot loop.

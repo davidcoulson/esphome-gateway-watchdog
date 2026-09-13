@@ -67,6 +67,16 @@ class GatewayWatchdog : public PollingComponent {
 
   uint32_t last_loop_ms_{0};
 
+  // Updated on EVERY callback, success or timeout. This is what separates
+  // "the gateway is not answering" (timeouts keep arriving - a real signal)
+  // from "the ping session itself is dead" (no callbacks at all - our
+  // problem, not the network's).
+  volatile uint32_t last_callback_ms_{0};
+
+  // Set when we rebuild the session in response to a window expiring, so a
+  // reboot needs a fresh session to fail too - not just the first one.
+  bool session_rebuilt_for_window_{false};
+
 #ifdef USE_SENSOR
   sensor::Sensor *packet_loss_sensor_{nullptr};
   sensor::Sensor *round_trip_time_sensor_{nullptr};

@@ -60,7 +60,7 @@ CONFIG_SCHEMA = cv.All(
             # what makes one include work unmodified across every VLAN.
             cv.Optional(CONF_TARGET): cv.ipv4address,
             cv.Optional(
-                CONF_REBOOT_WINDOW, default="120s"
+                CONF_REBOOT_WINDOW, default="300s"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(
                 CONF_PING_INTERVAL, default="5s"

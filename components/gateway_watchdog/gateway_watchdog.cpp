@@ -23,6 +23,12 @@ static const char *const TAG = "gateway_watchdog";
 // a perfectly healthy node.
 static const uint32_t STALL_FACTOR = 4;
 
+// A live esp_ping session emits a callback - reply or timeout - every
+// ping_interval. Going this many intervals with NO callback at all means the
+// session has stopped working (socket error, netif torn down and rebuilt by a
+// reconnect), not that the gateway is down. Rebuild rather than reboot.
+static const uint32_t CALLBACK_STALL_FACTOR = 6;
+
 static void ping_success_cb(esp_ping_handle_t hdl, void *args) {
   uint32_t elapsed = 0;
   esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed, sizeof(elapsed));
@@ -34,13 +40,19 @@ static void ping_timeout_cb(esp_ping_handle_t hdl, void *args) {
 }
 
 void GatewayWatchdog::on_reply(uint32_t elapsed_ms) {
+  this->last_callback_ms_ = millis();
   this->last_reply_ms_ = millis();
   this->replies_ = this->replies_ + 1;
   this->rtt_sum_ms_ = this->rtt_sum_ms_ + elapsed_ms;
   this->armed_ = true;
 }
 
-void GatewayWatchdog::on_timeout() { this->timeouts_ = this->timeouts_ + 1; }
+void GatewayWatchdog::on_timeout() {
+  // Deliberately also stamps last_callback_ms_: a timeout proves the session
+  // is alive and doing its job. Only silence means the session is gone.
+  this->last_callback_ms_ = millis();
+  this->timeouts_ = this->timeouts_ + 1;
+}
 
 uint32_t GatewayWatchdog::resolve_target_() {
   if (this->target_str_ != nullptr) {
@@ -112,6 +124,8 @@ bool GatewayWatchdog::start_session_(uint32_t addr) {
 
   this->target_addr_ = addr;
   this->last_reply_ms_ = millis();
+  this->last_callback_ms_ = millis();
+  this->session_rebuilt_for_window_ = false;
   ESP_LOGI(TAG, "watching " IPSTR, IP2STR((esp_ip4_addr_t *) &addr));
   return true;
 }
@@ -148,6 +162,17 @@ void GatewayWatchdog::loop() {
     return;
   }
 
+  // The session should be emitting a callback every ping_interval, reply or
+  // timeout. Total silence means the session died rather than the gateway.
+  // Rebuild it; start_session_ clears armed_, so the node must reach the
+  // gateway again before a reboot is even on the table.
+  const uint32_t silence = now - this->last_callback_ms_;
+  if (silence > this->ping_interval_ * CALLBACK_STALL_FACTOR) {
+    ESP_LOGW(TAG, "no ping callbacks for %" PRIu32 " ms - rebuilding session", silence);
+    this->start_session_(addr);
+    return;
+  }
+
   // Never reboot on a target we have not reached even once. A node that
   // has never seen its gateway (wrong VLAN, config sent to the wrong
   // device) must not sit in a reboot loop.
@@ -155,15 +180,30 @@ void GatewayWatchdog::loop() {
     return;
 
   const uint32_t since = now - this->last_reply_ms_;
-  if (since > this->reboot_window_) {
-    if (this->reboot_enabled_) {
-      ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms - rebooting", since);
-      App.safe_reboot();
-    } else {
-      ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms (reboot disabled)", since);
-      this->last_reply_ms_ = now;
-    }
+  if (since <= this->reboot_window_)
+    return;
+
+  if (!this->reboot_enabled_) {
+    ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms (reboot disabled)", since);
+    this->last_reply_ms_ = now;
+    return;
   }
+
+  // A window expired with a session that looked alive. Before power-cycling
+  // whatever this node drives, spend one more window on a freshly built
+  // session: if the old one was subtly broken, the rebuild fixes it and the
+  // node re-arms instead of rebooting. Only a second full window - on a
+  // session we just created, having reached the gateway since - reboots.
+  if (!this->session_rebuilt_for_window_) {
+    ESP_LOGW(TAG, "gateway unreachable %" PRIu32 " ms - rebuilding session before "
+                  "considering a reboot", since);
+    this->start_session_(addr);
+    this->session_rebuilt_for_window_ = true;
+    return;
+  }
+
+  ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms after session rebuild - rebooting", since);
+  App.safe_reboot();
 }
 
 void GatewayWatchdog::update() {
