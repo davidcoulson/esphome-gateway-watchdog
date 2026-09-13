@@ -6,6 +6,7 @@
 #include <cinttypes>
 
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 #include "esphome/core/hal.h"
 
 #ifdef USE_SENSOR
@@ -31,10 +32,14 @@ class GatewayWatchdog : public PollingComponent {
   void set_ping_interval(uint32_t ms) { this->ping_interval_ = ms; }
   void set_ping_timeout(uint32_t ms) { this->ping_timeout_ = ms; }
   void set_reboot_enabled(bool enabled) { this->reboot_enabled_ = enabled; }
+  void set_max_reboots(uint32_t n) { this->max_reboots_ = n; }
+  void set_budget_reset_after(uint32_t ms) { this->budget_reset_after_ = ms; }
+  void set_arm_delay(uint32_t ms) { this->arm_delay_ = ms; }
 
 #ifdef USE_SENSOR
   void set_packet_loss_sensor(sensor::Sensor *s) { this->packet_loss_sensor_ = s; }
   void set_round_trip_time_sensor(sensor::Sensor *s) { this->round_trip_time_sensor_ = s; }
+  void set_reboots_used_sensor(sensor::Sensor *s) { this->reboots_used_sensor_ = s; }
 #endif
 
   // Called from the esp_ping task.
@@ -43,6 +48,7 @@ class GatewayWatchdog : public PollingComponent {
 
  protected:
   uint32_t resolve_target_();
+  void save_budget_();
   bool start_session_(uint32_t addr);
   void stop_session_();
 
@@ -51,6 +57,12 @@ class GatewayWatchdog : public PollingComponent {
   uint32_t ping_interval_{5000};
   uint32_t ping_timeout_{2000};
   bool reboot_enabled_{true};
+  // Hard cap on how many times this component may reboot the node before it
+  // gives up and just reports. A watchdog that keeps firing has stopped being
+  // recovery and become the outage.
+  uint32_t max_reboots_{2};
+  uint32_t budget_reset_after_{3600000};
+  uint32_t arm_delay_{60000};
 
   esp_ping_handle_t handle_{nullptr};
   uint32_t target_addr_{0};
@@ -77,9 +89,16 @@ class GatewayWatchdog : public PollingComponent {
   // reboot needs a fresh session to fail too - not just the first one.
   bool session_rebuilt_for_window_{false};
 
+  // NVS-backed so the budget survives the very reboots it is counting -
+  // otherwise every reboot resets the counter and the cap does nothing.
+  ESPPreferenceObject pref_;
+  uint32_t reboots_used_{0};
+  bool budget_reset_done_{false};
+
 #ifdef USE_SENSOR
   sensor::Sensor *packet_loss_sensor_{nullptr};
   sensor::Sensor *round_trip_time_sensor_{nullptr};
+  sensor::Sensor *reboots_used_sensor_{nullptr};
 #endif
 };
 

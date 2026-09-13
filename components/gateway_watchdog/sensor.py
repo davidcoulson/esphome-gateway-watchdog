@@ -23,8 +23,9 @@ DEPENDENCIES = ["gateway_watchdog"]
 
 CONF_PACKET_LOSS = "packet_loss"
 CONF_ROUND_TRIP_TIME = "round_trip_time"
+CONF_REBOOTS_USED = "reboots_used"
 
-_SENSORS = (CONF_PACKET_LOSS, CONF_ROUND_TRIP_TIME)
+_SENSORS = (CONF_PACKET_LOSS, CONF_ROUND_TRIP_TIME, CONF_REBOOTS_USED)
 
 
 def _default_internal(config):
@@ -53,6 +54,12 @@ CONFIG_SCHEMA = cv.All(
                 state_class=STATE_CLASS_MEASUREMENT,
                 entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
             ),
+            cv.Optional(CONF_REBOOTS_USED): sensor.sensor_schema(
+                icon="mdi:restart-alert",
+                accuracy_decimals=0,
+                state_class=STATE_CLASS_MEASUREMENT,
+                entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+            ),
         }
     ),
     cv.has_at_least_one_key(*_SENSORS),
@@ -69,3 +76,6 @@ async def to_code(config):
     if CONF_ROUND_TRIP_TIME in config:
         sens = await sensor.new_sensor(config[CONF_ROUND_TRIP_TIME])
         cg.add(parent.set_round_trip_time_sensor(sens))
+    if CONF_REBOOTS_USED in config:
+        sens = await sensor.new_sensor(config[CONF_REBOOTS_USED])
+        cg.add(parent.set_reboots_used_sensor(sens))

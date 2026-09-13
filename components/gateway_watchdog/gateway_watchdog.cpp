@@ -7,6 +7,7 @@
 
 #include "esphome/core/application.h"
 #include "esphome/core/log.h"
+#include "esphome/core/helpers.h"
 #include "esphome/components/network/util.h"
 
 #include "esp_netif.h"
@@ -130,11 +131,48 @@ bool GatewayWatchdog::start_session_(uint32_t addr) {
   return true;
 }
 
-void GatewayWatchdog::setup() { this->last_loop_ms_ = millis(); }
+void GatewayWatchdog::setup() {
+  this->last_loop_ms_ = millis();
+
+  // Restore the reboot budget. It has to outlive a reboot to mean anything.
+  this->pref_ = global_preferences->make_preference<uint32_t>(fnv1_hash("gateway_watchdog_reboots"));
+  uint32_t stored = 0;
+  if (this->pref_.load(&stored))
+    this->reboots_used_ = stored;
+  if (this->reboots_used_ > 0)
+    ESP_LOGW(TAG, "restored reboot budget: %" PRIu32 " of %" PRIu32 " used",
+             this->reboots_used_, this->max_reboots_);
+}
+
+void GatewayWatchdog::save_budget_() {
+  this->pref_.save(&this->reboots_used_);
+  global_preferences->sync();
+}
 
 void GatewayWatchdog::loop() {
   const uint32_t now = millis();
   const uint32_t stall_limit = this->ping_interval_ * STALL_FACTOR;
+
+  // Nothing at all until the node has settled. A freshly booted node is
+  // still bringing up WiFi, DHCP and mDNS; starting a ping session into
+  // that churn invites a broken socket, and treating the churn as an
+  // outage would reboot a node that is merely still starting.
+  if (now < this->arm_delay_)
+    return;
+
+  // Reward a long healthy run by returning the budget. Without this the
+  // cap is one-way and a node that misbehaved once months ago would never
+  // be allowed to protect itself again.
+  if (!this->budget_reset_done_ && this->reboots_used_ > 0 && this->armed_ &&
+      now > this->arm_delay_ + this->budget_reset_after_) {
+    ESP_LOGW(TAG, "healthy for %" PRIu32 " ms - resetting reboot budget",
+             this->budget_reset_after_);
+    this->reboots_used_ = 0;
+    this->budget_reset_done_ = true;
+    this->save_budget_();
+    if (this->reboots_used_sensor_ != nullptr)
+      this->reboots_used_sensor_->publish_state(0);
+  }
 
   if (this->last_loop_ms_ != 0 && (now - this->last_loop_ms_) > stall_limit) {
     ESP_LOGW(TAG, "loop starved %" PRIu32 " ms - crediting window",
@@ -202,7 +240,24 @@ void GatewayWatchdog::loop() {
     return;
   }
 
-  ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms after session rebuild - rebooting", since);
+  // The budget. Everything above tries to avoid a needless reboot; this is
+  // the backstop that holds even if all of it is wrong about the cause. Two
+  // reboots is recovery; the third is a node stuck in a loop, and a node
+  // sitting up and reporting 100% loss is far more useful than one power
+  // cycling every few minutes.
+  if (this->reboots_used_ >= this->max_reboots_) {
+    ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms but reboot budget spent "
+                  "(%" PRIu32 "/%" PRIu32 ") - staying up and reporting",
+             since, this->reboots_used_, this->max_reboots_);
+    this->last_reply_ms_ = now;  // don't spin on this branch every loop
+    return;
+  }
+
+  this->reboots_used_ = this->reboots_used_ + 1;
+  this->save_budget_();
+  ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms after session rebuild - rebooting "
+                "(%" PRIu32 "/%" PRIu32 " of budget)",
+           since, this->reboots_used_, this->max_reboots_);
   App.safe_reboot();
 }
 
@@ -226,6 +281,8 @@ void GatewayWatchdog::update() {
       this->packet_loss_sensor_->publish_state(100.0f * (float) timeouts / (float) total);
     }
   }
+  if (this->reboots_used_sensor_ != nullptr)
+    this->reboots_used_sensor_->publish_state((float) this->reboots_used_);
   if (this->round_trip_time_sensor_ != nullptr) {
     if (replies == 0) {
       this->round_trip_time_sensor_->publish_state(NAN);
@@ -247,6 +304,10 @@ void GatewayWatchdog::dump_config() {
   ESP_LOGCONFIG(TAG, "  Ping timeout: %" PRIu32 " ms", this->ping_timeout_);
   ESP_LOGCONFIG(TAG, "  Reboot window: %" PRIu32 " ms", this->reboot_window_);
   ESP_LOGCONFIG(TAG, "  Reboot enabled: %s", YESNO(this->reboot_enabled_));
+  ESP_LOGCONFIG(TAG, "  Reboot budget: %" PRIu32 " used of %" PRIu32,
+                this->reboots_used_, this->max_reboots_);
+  ESP_LOGCONFIG(TAG, "  Budget resets after: %" PRIu32 " ms healthy", this->budget_reset_after_);
+  ESP_LOGCONFIG(TAG, "  Arm delay: %" PRIu32 " ms", this->arm_delay_);
 }
 
 }  // namespace gateway_watchdog

@@ -27,6 +27,9 @@ CONF_REBOOT_WINDOW = "reboot_window"
 CONF_PING_INTERVAL = "ping_interval"
 CONF_PING_TIMEOUT = "ping_timeout"
 CONF_REBOOT = "reboot"
+CONF_MAX_REBOOTS = "max_reboots"
+CONF_BUDGET_RESET_AFTER = "budget_reset_after"
+CONF_ARM_DELAY = "arm_delay"
 
 
 def _validate(config):
@@ -69,6 +72,16 @@ CONFIG_SCHEMA = cv.All(
                 CONF_PING_TIMEOUT, default="2s"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_REBOOT, default=True): cv.boolean,
+            # Hard cap on reboots. The backstop that makes a reboot loop
+            # impossible even if every other safeguard misjudges the cause.
+            # 0 means never reboot (same as reboot: false).
+            cv.Optional(CONF_MAX_REBOOTS, default=2): cv.int_range(min=0, max=100),
+            cv.Optional(
+                CONF_BUDGET_RESET_AFTER, default="1h"
+            ): cv.positive_time_period_milliseconds,
+            cv.Optional(
+                CONF_ARM_DELAY, default="60s"
+            ): cv.positive_time_period_milliseconds,
         }
     ).extend(cv.polling_component_schema("60s")),
     _validate,
@@ -85,3 +98,6 @@ async def to_code(config):
     cg.add(var.set_ping_interval(config[CONF_PING_INTERVAL]))
     cg.add(var.set_ping_timeout(config[CONF_PING_TIMEOUT]))
     cg.add(var.set_reboot_enabled(config[CONF_REBOOT]))
+    cg.add(var.set_max_reboots(config[CONF_MAX_REBOOTS]))
+    cg.add(var.set_budget_reset_after(config[CONF_BUDGET_RESET_AFTER]))
+    cg.add(var.set_arm_delay(config[CONF_ARM_DELAY]))
