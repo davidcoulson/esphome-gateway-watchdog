@@ -72,9 +72,17 @@ CONFIG_SCHEMA = cv.All(
                 CONF_PING_TIMEOUT, default="2s"
             ): cv.positive_time_period_milliseconds,
             cv.Optional(CONF_REBOOT, default=True): cv.boolean,
-            # Hard cap on reboots. The backstop that makes a reboot loop
+            # Cap on reboots - the backstop that makes a reboot loop
             # impossible even if every other safeguard misjudges the cause.
-            # 0 means never reboot (same as reboot: false).
+            #
+            #   N > 0  cap at N, then stay up and report (recommended)
+            #   0      UNLIMITED - keep rebooting until the gateway returns
+            #
+            # Use reboot: false to disable rebooting entirely. Unlimited is
+            # the right choice when an unreachable node is useless anyway and
+            # you would rather it kept trying; the cost is that a wrong
+            # diagnosis becomes an unbounded loop, which is exactly what took
+            # out ~40 nodes on 2026-09-12.
             cv.Optional(CONF_MAX_REBOOTS, default=2): cv.int_range(min=0, max=100),
             cv.Optional(
                 CONF_BUDGET_RESET_AFTER, default="1h"

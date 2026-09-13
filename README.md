@@ -84,6 +84,9 @@ gateway_watchdog:
   ping_timeout: 2s        # per-request timeout; must be < ping_interval
   reboot_window: 120s     # no reply anywhere in this window => reboot
   reboot: true            # false = report only, never reboot
+  max_reboots: 2          # cap; 0 = unlimited, keep rebooting until it clears
+  budget_reset_after: 1h  # healthy uptime that returns the budget
+  arm_delay: 60s          # ignore everything for this long after boot
   update_interval: 60s    # how often the sensors publish
 
 sensor:

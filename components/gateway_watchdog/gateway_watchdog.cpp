@@ -245,7 +245,11 @@ void GatewayWatchdog::loop() {
   // reboots is recovery; the third is a node stuck in a loop, and a node
   // sitting up and reporting 100% loss is far more useful than one power
   // cycling every few minutes.
-  if (this->reboots_used_ >= this->max_reboots_) {
+  // max_reboots: 0 means UNLIMITED - keep rebooting for as long as the
+  // gateway stays unreachable. Use it when a node is more useful cycling
+  // than sitting unreachable, and accept that a mistaken diagnosis then
+  // costs an unbounded reboot loop. Any value above 0 caps it.
+  if (this->max_reboots_ > 0 && this->reboots_used_ >= this->max_reboots_) {
     ESP_LOGE(TAG, "gateway unreachable %" PRIu32 " ms but reboot budget spent "
                   "(%" PRIu32 "/%" PRIu32 ") - staying up and reporting",
              since, this->reboots_used_, this->max_reboots_);
@@ -304,8 +308,12 @@ void GatewayWatchdog::dump_config() {
   ESP_LOGCONFIG(TAG, "  Ping timeout: %" PRIu32 " ms", this->ping_timeout_);
   ESP_LOGCONFIG(TAG, "  Reboot window: %" PRIu32 " ms", this->reboot_window_);
   ESP_LOGCONFIG(TAG, "  Reboot enabled: %s", YESNO(this->reboot_enabled_));
-  ESP_LOGCONFIG(TAG, "  Reboot budget: %" PRIu32 " used of %" PRIu32,
-                this->reboots_used_, this->max_reboots_);
+  if (this->max_reboots_ == 0) {
+    ESP_LOGCONFIG(TAG, "  Reboot budget: UNLIMITED (%" PRIu32 " used so far)", this->reboots_used_);
+  } else {
+    ESP_LOGCONFIG(TAG, "  Reboot budget: %" PRIu32 " used of %" PRIu32,
+                  this->reboots_used_, this->max_reboots_);
+  }
   ESP_LOGCONFIG(TAG, "  Budget resets after: %" PRIu32 " ms healthy", this->budget_reset_after_);
   ESP_LOGCONFIG(TAG, "  Arm delay: %" PRIu32 " ms", this->arm_delay_);
 }
