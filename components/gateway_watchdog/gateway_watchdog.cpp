@@ -225,6 +225,20 @@ void GatewayWatchdog::loop() {
   if (!this->armed_)
     return;
 
+  // End the outage the last rebuild was spent on. start_session_ clears the
+  // flag, but the caller sets it straight back, so without this it stayed set
+  // after a recovery and a separate outage days later rebooted after a single
+  // window - no rebuild at all, contrary to the comment further down.
+  //
+  // "Recovered" = the gateway answered for longer than a reboot window after
+  // the rebuild. Not just "armed again": re-arming on the new session is the
+  // precondition for the reboot below, so clearing on it would mean never
+  // rebooting. The loop-stall and link-down credits also move last_reply_ms_,
+  // which can only err towards another rebuild instead of a reboot.
+  if (this->session_rebuilt_for_window_ &&
+      (this->last_reply_ms_ - this->rebuilt_at_ms_) > this->reboot_window_)
+    this->session_rebuilt_for_window_ = false;
+
   const uint32_t since = now - this->last_reply_ms_;
   if (since <= this->reboot_window_)
     return;
@@ -245,6 +259,7 @@ void GatewayWatchdog::loop() {
                   "considering a reboot", since);
     this->start_session_(addr);
     this->session_rebuilt_for_window_ = true;
+    this->rebuilt_at_ms_ = now;
     return;
   }
 

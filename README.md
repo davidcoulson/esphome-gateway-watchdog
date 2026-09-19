@@ -132,7 +132,9 @@ these is deliberate:
 0b. **Rebuilds once before ever rebooting.** Even when the session looks
    alive, the first expired window rebuilds it and starts a fresh window
    instead of rebooting. Only a second full window — on a session created
-   after the node had reached the gateway again — actually reboots.
+   after the node had reached the gateway again — actually reboots. That
+   rebuild is per outage: once the gateway has answered for a full window
+   after it, the next outage gets its own rebuild first.
 1. **Never reboots on a target it has never once reached.** A node that has
    never seen its gateway — wrong VLAN, bad credentials, a config flashed to the
    wrong device — logs and stays up rather than entering a reboot loop.
