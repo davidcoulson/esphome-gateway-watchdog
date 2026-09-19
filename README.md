@@ -204,6 +204,26 @@ Reset Reason: Reboot request from gateway_watchdog
 which distinguishes it from `Reboot request from esphome.ota`, a Restart
 button, `api.reboot_timeout`, a power cycle or a panic.
 
+## Tests
+
+```bash
+tests/run.sh
+```
+
+Host tests that compile the **real** `gateway_watchdog.cpp` against small stubs
+(`tests/stubs/`) for the handful of ESPHome and ESP-IDF APIs it touches:
+`millis()`, NVS preferences, `esp_ping`, the default netif, logging and
+`App.safe_reboot()`. Nothing is transcribed, so the tests cannot drift from the
+component. Needs only a C++17 compiler; CI runs them on every push.
+
+They simulate the fleet config (5 s pings, 300 s window, 60 s arm delay, a
+budget of 2) one main-loop tick per second and cover arming, loop stalls, every
+case that must never reboot, the reboot path, the NVS-backed budget, session
+rebuilds, gateway changes and the sensors.
+
+A `KNOWN` line is behaviour the source's own comments say should differ. It is
+reported rather than failed so the suite stays green while it is open.
+
 ## Verified
 
 Tested on ESP32-C3 hardware against ESPHome 2026.8.2 / ESP-IDF 6.1.0, and
