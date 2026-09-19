@@ -94,16 +94,10 @@ struct Sim {
   }
 };
 
-int failures = 0, known = 0;
+int failures = 0;
 void check(bool ok, const char *what) {
   std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
   if (!ok) failures++;
-}
-// Behaviour the source's own comments say should differ. Reported, not
-// failed, so the suite stays green while the question is open.
-void known_issue(bool behaves_as_documented, const char *what) {
-  std::printf("%s  %s\n", behaves_as_documented ? "ok  " : "KNOWN", what);
-  if (!behaves_as_documented) known++;
 }
 
 }  // namespace
@@ -287,26 +281,35 @@ int main() {
     check(std::isnan(s.loss.state), "counters reset each period");
   }
 
-  std::printf("\n== documented behaviour the code does not match ==\n");
+  std::printf("\n== each outage gets its own rebuild ==\n");
   {
-    // gateway_watchdog.cpp: "Before power-cycling whatever this node drives,
-    // spend one more window on a freshly built session ... Only a second full
-    // window - on a session we just created, having reached the gateway
-    // since - reboots." session_rebuilt_for_window_ is only cleared inside
-    // start_session_, so after one rebuild-and-recover, a separate outage
-    // days later reboots after a single window with no rebuild at all.
+    // The rebuild flag used to outlive the outage it was spent on, so after
+    // one rebuild-and-recover a separate outage days later rebooted after a
+    // single window, with no rebuild.
     Sim s;
     s.arm();
     s.run(WINDOW + 10000, Ping::TIMEOUT);    // incident 1: rebuild...
     s.run(15000, Ping::REPLY);               // ...and recovery
     s.run(3 * 24 * 3600000u, Ping::REPLY);   // three healthy days
     s.run(WINDOW + 10000, Ping::TIMEOUT);    // incident 2
-    known_issue(fake::reboots == 0,
-                "a new outage long after a recovered one gets its own session rebuild before any reboot");
+    check(fake::reboots == 0 && fake::count_logs("rebuilding session before considering a reboot") == 2,
+          "a new outage long after a recovered one gets its own rebuild before any reboot");
+    s.run(15000, Ping::REPLY);
+    s.run(WINDOW + 10000, Ping::TIMEOUT);
+    check(fake::reboots == 1, "and still reboots if the rebuilt session loses the gateway too");
+  }
+  {
+    // Recovery shorter than a window is the same outage: no second rebuild.
+    Sim s;
+    s.arm();
+    s.run(WINDOW + 10000, Ping::TIMEOUT);
+    s.run(WINDOW - 60000, Ping::REPLY);
+    s.run(WINDOW + 10000, Ping::TIMEOUT);
+    check(fake::reboots == 1 && fake::count_logs("rebuilding session before considering a reboot") == 1,
+          "a flapping gateway that never stays up a full window still reboots");
   }
 
   std::printf("\n%s", failures ? "FAILED" : "all passed");
-  if (known) std::printf(" (%d known issue%s reported above)", known, known == 1 ? "" : "s");
   std::printf("\n");
   return failures ? 1 : 0;
 }

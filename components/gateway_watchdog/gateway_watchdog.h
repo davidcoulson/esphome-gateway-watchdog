@@ -88,6 +88,10 @@ class GatewayWatchdog : public PollingComponent {
   // Set when we rebuild the session in response to a window expiring, so a
   // reboot needs a fresh session to fail too - not just the first one.
   bool session_rebuilt_for_window_{false};
+  // When that rebuild happened. The flag belongs to one outage: once the
+  // gateway has answered for a full reboot window past this point, the outage
+  // is over and the next one earns its own rebuild.
+  uint32_t rebuilt_at_ms_{0};
 
   // NVS-backed so the budget survives the very reboots it is counting -
   // otherwise every reboot resets the counter and the cap does nothing.
