@@ -157,8 +157,16 @@ void GatewayWatchdog::loop() {
   // still bringing up WiFi, DHCP and mDNS; starting a ping session into
   // that churn invites a broken socket, and treating the churn as an
   // outage would reboot a node that is merely still starting.
-  if (now < this->arm_delay_)
+  //
+  // Keep the stall clock running while we wait. setup() stamps last_loop_ms_,
+  // and returning here without refreshing it meant the first armed loop() saw
+  // the whole arm delay as a gap: every node logged "loop starved ~59700 ms"
+  // on every boot (arm_delay minus setup time). Waiting on purpose is not a
+  // stall, and a false warning there hides the real one an OTA can cause.
+  if (now < this->arm_delay_) {
+    this->last_loop_ms_ = now;
     return;
+  }
 
   // Reward a long healthy run by returning the budget. Without this the
   // cap is one-way and a node that misbehaved once months ago would never
