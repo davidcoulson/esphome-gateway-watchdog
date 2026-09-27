@@ -54,7 +54,12 @@ struct ip_addr_t {
   uint8_t type;
 };
 #define IPADDR_STRLEN_MAX 46
+#define LWIP_IPV6_NUM_ADDRESSES 3
+#define PP_HTONL(x) htonl(x)
 #define IP_IS_V6(a) ((a)->type == IPADDR_TYPE_V6)
+#define ip_2_ip6(a) (&(a)->u_addr.ip6)
+// fe80::/10, as lwIP tests it: first 16 bits masked to 0xffc0 == 0xfe80.
+#define ip6_addr_islinklocal(a) ((ntohl((a)->addr[0]) & 0xffc00000UL) == 0xfe800000UL)
 #define ip_addr_set_ip4_u32_val(ipaddr, val) \
   do { (ipaddr) = ip_addr_t{}; (ipaddr).u_addr.ip4.addr = (val); (ipaddr).type = IPADDR_TYPE_V4; } while (0)
 #define ip_addr_copy_from_ip6(dest, src) \

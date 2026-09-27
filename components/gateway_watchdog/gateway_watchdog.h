@@ -35,6 +35,7 @@ class GatewayWatchdog : public PollingComponent {
   void set_max_reboots(uint32_t n) { this->max_reboots_ = n; }
   void set_budget_reset_after(uint32_t ms) { this->budget_reset_after_ = ms; }
   void set_arm_delay(uint32_t ms) { this->arm_delay_ = ms; }
+  void set_prefix_router(bool enabled) { this->prefix_router_ = enabled; }
 
 #ifdef USE_SENSOR
   void set_packet_loss_sensor(sensor::Sensor *s) { this->packet_loss_sensor_ = s; }
@@ -68,6 +69,10 @@ class GatewayWatchdog : public PollingComponent {
   uint32_t max_reboots_{2};
   uint32_t budget_reset_after_{3600000};
   uint32_t arm_delay_{60000};
+  // Watch <prefix>::1 of the node's own /64 instead of a link-local router
+  // address, and derive it even when no default router is advertised. See
+  // resolve_target_().
+  bool prefix_router_{false};
 
   esp_ping_handle_t handle_{nullptr};
   ip_addr_t target_addr_{};

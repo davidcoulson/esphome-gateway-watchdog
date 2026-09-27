@@ -458,6 +458,109 @@ int main() {
     check(fake::target_is("fe80::1") && fake::session_interface == 2,
           "a zone suffix lwIP cannot match still pings out of the default interface");
   }
+
+  std::printf("\n== prefix_router: <prefix>::1 instead of a link-local router ==\n");
+  {
+    // The case it exists for: routers commonly do not answer echo requests
+    // on their link-local address, so a fe80:: target reads as 100% loss.
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::21b:17ff:fe00:140", 1, 1800);
+    fake::add_node_addr("fe80::4af6:eeff:fee1:dc38");
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_is("fd69:deca:fbad:4::1") && fake::session_interface == 2,
+          "a fe80:: default router is replaced by <prefix>::1 of the node's /64");
+    check(s.wd.armed_, "and the replacement is what gets pinged and arms");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::21b:17ff:fe00:140", 1, 1800);
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");
+    s.arm();
+    check(fake::target_is("fe80::21b:17ff:fe00:140"), "off by default: the link-local router is watched as before");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    fake::add_node_addr("2001:db8:1:4:4af6:eeff:fee1:dc38");
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_is("fd69:deca:fbad:4::1"), "a ULA prefix is used before a global one (it survives ISP renumbering)");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    fake::add_node_addr("2001:db8:1:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_is("2001:db8:1:4::1"), "a global prefix is used when there is no ULA");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    fake::add_node_addr("2001:db8:1:4:4af6:eeff:fee1:dc38", /*preferred=*/false);  // being renumbered away
+    fake::add_node_addr("2001:db8:9:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_is("2001:db8:9:4::1"), "a deprecated prefix is never chosen");
+  }
+  {
+    // No upstream IPv6: the router advertises its prefix with lifetime 0,
+    // so no default router is ever learned - but the node has an address.
+    Sim s;
+    fake::gateway = 0;
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_is("fd69:deca:fbad:4::1") && fake::session_interface == 2,
+          "with no default router at all, <prefix>::1 is still derived");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    fake::add_node_addr("fe80::4af6:eeff:fee1:dc38");  // link-local only, no prefix yet
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_is("fe80::1"), "with no ULA or global address yet, the router itself is watched");
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");  // the RA's prefix arrives
+    s.run(5000, Ping::REPLY);
+    check(fake::target_is("fd69:deca:fbad:4::1"), "and it switches to <prefix>::1 once the node has one");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    s.wd.set_target_str("fe80::21b:17ff:fe00:140");
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_is("fd69:deca:fbad:4::1"), "a static link-local target is replaced the same way");
+  }
+  {
+    Sim s;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    check(fake::target_v4() == GW, "an IPv4 gateway still wins on a dual-stack node");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    fake::add_node_addr("fd69:deca:fbad:4:4af6:eeff:fee1:dc38");
+    s.wd.set_prefix_router(true);
+    s.arm();
+    s.lose_rebuild_recover_lose();
+    check(fake::reboots == 1, "the rebuild-then-reboot path works on a prefix target");
+  }
 #endif
 
   std::printf("\n%s", failures ? "FAILED" : "all passed");
