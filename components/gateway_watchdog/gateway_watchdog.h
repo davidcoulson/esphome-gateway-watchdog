@@ -47,12 +47,14 @@ class GatewayWatchdog : public PollingComponent {
   void on_timeout();
 
  protected:
-  // Fills *out with the address to watch: the static target if configured,
-  // else the IPv4 default gateway, else (IPv6-only network) the first live
-  // ND6 default router. False when there is nothing to watch yet.
-  bool resolve_target_(ip_addr_t *out);
+  // Fills *out with the address to watch - the static target if configured,
+  // else the IPv4 default gateway, else (IPv6-only network) the ND6 default
+  // router - and *ifindex with the lwIP netif index the echo requests must
+  // leave through (0 = let the stack route, which is what IPv4 does). False
+  // when there is nothing to watch yet.
+  bool resolve_target_(ip_addr_t *out, uint32_t *ifindex);
   void save_budget_();
-  bool start_session_(const ip_addr_t &addr);
+  bool start_session_(const ip_addr_t &addr, uint32_t ifindex);
   void stop_session_();
 
   const char *target_str_{nullptr};
@@ -69,6 +71,9 @@ class GatewayWatchdog : public PollingComponent {
 
   esp_ping_handle_t handle_{nullptr};
   ip_addr_t target_addr_{};
+  // Part of the target's identity: the same link-local router address on a
+  // different interface is a different router.
+  uint32_t target_ifindex_{0};
 
   // Written from the ping task, read from the main loop. Both are 32-bit
   // scalars, which are atomic on this target; the counters are only ever
@@ -101,6 +106,17 @@ class GatewayWatchdog : public PollingComponent {
   ESPPreferenceObject pref_;
   uint32_t reboots_used_{0};
   bool budget_reset_done_{false};
+
+  // Last time the gateway was demonstrably unreachable - a reboot window
+  // expiring, whatever was done about it. The budget comes back only after
+  // budget_reset_after_ with none of that, which is what "healthy" means;
+  // uptime alone gave a flapping node two more reboots every hour.
+  uint32_t last_trouble_ms_{0};
+
+  // Latched once the arm delay has passed. millis() is 32-bit and wraps
+  // after 49.7 days; comparing now < arm_delay_ on every loop made the
+  // watchdog go deaf for arm_delay_ each time it did.
+  bool past_arm_delay_{false};
 
 #ifdef USE_SENSOR
   sensor::Sensor *packet_loss_sensor_{nullptr};

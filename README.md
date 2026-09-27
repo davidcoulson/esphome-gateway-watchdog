@@ -45,7 +45,8 @@ gateway_watchdog:
 
 That's the whole minimum config. With no `target:`, it follows the
 DHCP-supplied default gateway, so the same block works unmodified on every
-VLAN and re-targets itself if the lease changes.
+VLAN and re-targets itself if the lease changes. On an IPv6-only network it
+watches the router-advertised default router instead — see [IPv6](#ipv6).
 
 ### Pin `refresh: always` while iterating
 
@@ -79,13 +80,14 @@ or clear the cache for that build host (`.esphome/external_components/`).
 ```yaml
 gateway_watchdog:
   id: gw_wd
-  target: 10.2.4.1        # optional; default = DHCP default gateway
+  target: 10.2.4.1        # optional; IPv4 or IPv6. Default: the DHCPv4
+                          # gateway, else the IPv6 default router
   ping_interval: 5s       # how often an echo request goes out
   ping_timeout: 2s        # per-request timeout; must be < ping_interval
   reboot_window: 120s     # no reply anywhere in this window => reboot
   reboot: true            # false = report only, never reboot
   max_reboots: 2          # cap; 0 = unlimited, keep rebooting until it clears
-  budget_reset_after: 1h  # healthy uptime that returns the budget
+  budget_reset_after: 1h  # this long with no expired window returns the budget
   arm_delay: 60s          # ignore everything for this long after boot
   update_interval: 60s    # how often the sensors publish
 
@@ -115,6 +117,54 @@ The config is rejected at build time if:
   gateway look like a dead one.
 - `reboot_window < ping_interval * 3` — at least three echo requests must have
   had the chance to fail before a reboot is on the table.
+- `target` is an IPv6 address without `network: enable_ipv6: true` — lwIP is
+  then built IPv4-only, the literal would fail to parse at runtime, and the
+  watchdog would silently never start.
+- `target` has a `%zone` suffix — see [IPv6](#ipv6).
+
+## IPv6
+
+Works on IPv6-only networks (router advertisements / SLAAC, no DHCPv4). Needs
+`network: enable_ipv6: true`.
+
+**With no `target:`**, the IPv4 gateway still wins when there is one, so
+dual-stack nodes behave exactly as before. Without one, the watchdog pings the
+**IPv6 default router** from lwIP's ND6 default-router table — the router's
+link-local address, i.e. exactly the next hop the node forwards through. lwIP
+has no public accessor for that table; `lwip/priv/nd6_priv.h` ships with ESP-IDF
+and is read under the lwIP core lock. With several routers it keeps the one
+already being watched while it is still advertised, else prefers one learned on
+the default interface. A router counts as present until its RA lifetime runs
+out, *not* only while it answers — a router that has stopped responding is
+exactly the one to keep pinging.
+
+**A static `target:`** may be an IPv6 literal, global (`2001:db8::1`) or
+link-local (`fe80::1`). No `%zone` suffix: lwIP would look the name up among
+its own interface names (ESP-IDF's `st1`, `en1`), not the `wlan0`/`eth0` you
+would write, and the zone is never needed — see below.
+
+**IPv6 sessions are bound to their interface.** The default router is a
+link-local address, and `esp_ping` passes the target to the socket layer
+without its scope id, so the zone is lost. Unbound, lwIP's `ip6_route()` has no
+netif for a zone-less link-local destination on any node with more than one
+netif — and ESP-IDF's loopback netif means that is every node — so every echo
+request fails to send. `esp_ping` ignores the send failure and reports a
+timeout, which makes a healthy router look like 100% packet loss. Binding the
+session (`SO_BINDTODEVICE`) sends from that interface and lets lwIP re-attach
+the zone. IPv4 sessions stay unbound, as before.
+
+**The catch is ESPHome, not this component.** On ESP32, ESPHome's `wifi` and
+`ethernet` components only report *connected* once they hold an IPv4 address
+([esphome/issues#7117](https://github.com/esphome/issues/issues/7117)), so a
+stock node never comes up on an IPv6-only network and the watchdog never gets
+to run. Getting there needs a patched `wifi`/`ethernet` with an `ipv6_only`
+option. The open upstream [esphome#14526](https://github.com/esphome/esphome/pull/14526)
+("Allow disabling IPv4") does not fix this: it still registers `wifi` and
+`ethernet` as requiring IPv4.
+
+Compile-tested against ESPHome 2026.9.0 / ESP-IDF 6.1.0 for an ESP32-C3 on an
+IPv6-only (`ipv6_only`) WiFi build; not yet run on hardware on an IPv6-only
+network.
 
 ## Safety properties
 
@@ -223,8 +273,12 @@ budget of 2) one main-loop tick per second and cover arming, loop stalls, every
 case that must never reboot, the reboot path, the NVS-backed budget, session
 rebuilds, gateway changes and the sensors.
 
-A `KNOWN` line is behaviour the source's own comments say should differ. It is
-reported rather than failed so the suite stays green while it is open.
+The suite is built and run **twice**: against an IPv4-only lwIP (how a node
+without `enable_ipv6` builds) and a dual-stack one. The IPv6 code is compiled
+out of the first, so running once would never exercise it. The dual-stack run
+adds the IPv6 cases: default-router discovery under the core lock, interface
+binding, router preference and churn, expiry, static IPv6 targets, and the full
+rebuild-then-reboot path over IPv6.
 
 ## Verified
 

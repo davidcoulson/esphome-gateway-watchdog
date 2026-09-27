@@ -109,7 +109,7 @@ int main() {
     s.run(ARM - 1000, Ping::REPLY);
     check(fake::sessions_created == 0, "no ping session during the arm delay");
     s.run(5000, Ping::REPLY);
-    check(fake::sessions_created == 1 && fake::session_target == GW, "session starts on the DHCP gateway once armed");
+    check(fake::sessions_created == 1 && fake::target_v4() == GW, "session starts on the DHCP gateway once armed");
     s.run(10000, Ping::REPLY);
     check(s.wd.armed_, "armed by the first reply");
   }
@@ -224,6 +224,39 @@ int main() {
     Sim again(true);
     check(again.wd.reboots_used_ == 0, "and the returned budget is persisted");
   }
+  {
+    // Spend the budget, then boot into a gateway that keeps flapping: seven
+    // minutes of loss (a window expires each time), one minute answering.
+    // The node re-arms between outages, so a reset that only asked "an hour
+    // of uptime and armed right now?" handed it two more reboots every hour.
+    { Sim s; s.arm(); s.lose_rebuild_recover_lose(); }
+    { Sim s(true); s.arm(); s.lose_rebuild_recover_lose(); }
+    Sim s(true);
+    s.arm();
+    for (int i = 0; i < 9; i++) {           // ~72 minutes
+      s.run(7 * 60000, Ping::TIMEOUT);
+      s.run(60000, Ping::REPLY);
+    }
+    check(fake::count_logs("rebuilding session before considering a reboot") >= 4,
+          "(the flapping gateway keeps expiring reboot windows)");
+    check(fake::count_logs("resetting reboot budget") == 0 && fake::reboots == 0,
+          "an hour of uptime with the gateway flapping does not return the budget");
+    s.run(BUDGET_RESET + 60000, Ping::REPLY);
+    check(s.wd.reboots_used_ == 0, "an hour of real health afterwards does");
+  }
+
+  std::printf("\n== millis() wrap (every 49.7 days) ==\n");
+  {
+    // millis() is 32-bit. Comparing now < arm_delay on every loop made the
+    // watchdog go deaf for the arm delay each time it wrapped.
+    Sim s;
+    s.arm();
+    fake::now_ms = 0xFFFFFFFFu - 10000;  // 10 s before the wrap
+    s.run(20000, Ping::REPLY);           // across it: now 10 s after
+    fake::gateway = GW2;                 // new lease 10 s after the wrap
+    s.run(5000, Ping::REPLY);
+    check(fake::target_v4() == GW2, "the watchdog keeps working straight through a millis() wrap");
+  }
 
   std::printf("\n== ping session management ==\n");
   {
@@ -239,7 +272,7 @@ int main() {
     s.arm();
     fake::gateway = GW2;  // new DHCP lease on a different gateway
     s.run(3000, Ping::REPLY);
-    check(fake::session_target == GW2, "follows the default gateway when the lease changes");
+    check(fake::target_v4() == GW2, "follows the default gateway when the lease changes");
   }
   {
     Sim s;
@@ -255,7 +288,7 @@ int main() {
     Sim s;
     s.wd.set_target_str("10.2.3.1");
     s.arm();
-    check(fake::session_target == (10u | 2u << 8 | 3u << 16 | 1u << 24), "a static target overrides DHCP");
+    check(fake::target_v4() == (10u | 2u << 8 | 3u << 16 | 1u << 24), "a static target overrides DHCP");
   }
   {
     Sim s;
@@ -308,6 +341,124 @@ int main() {
     check(fake::reboots == 1 && fake::count_logs("rebuilding session before considering a reboot") == 1,
           "a flapping gateway that never stays up a full window still reboots");
   }
+
+  std::printf("\n== IPv4 sessions are unchanged by IPv6 support ==\n");
+  {
+    Sim s;
+    s.arm();
+    check(fake::target_v4() == GW && fake::session_interface == 0,
+          "an IPv4 gateway session is left unbound, exactly as before");
+  }
+
+#if LWIP_IPV6
+  std::printf("\n== IPv6 ==\n");
+  {
+    // The IPv6-only case: no DHCPv4 lease, one router learned from RAs.
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);  // netif 1 = the default netif (index 2)
+    s.arm();
+    check(fake::target_is("fe80::1"), "with no IPv4 gateway the RA default router is watched");
+    // The bug this guards against: esp_ping drops the zone of a link-local
+    // target, and unbound, lwIP has no route for it on a multi-netif node, so
+    // every echo request failed to send and a healthy router read as 100% loss.
+    check(fake::session_interface == 2, "and the session is bound to the router's interface");
+    check(fake::lwip_locks_taken > 0, "the ND6 router table is read under the lwIP core lock");
+    check(s.wd.armed_, "a replying router arms the watchdog");
+  }
+  {
+    Sim s;
+    fake::set_router(0, "fe80::1", 1, 1800);  // dual-stack: an IPv4 gateway is present too
+    s.arm();
+    check(fake::target_v4() == GW, "an IPv4 gateway still wins on a dual-stack network");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    s.arm();
+    s.lose_rebuild_recover_lose();
+    check(fake::reboots == 1, "the full rebuild-then-reboot path works over IPv6");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    s.run(20 * 60000, Ping::TIMEOUT);
+    check(!s.wd.armed_ && fake::reboots == 0, "a router never reached even once never reboots");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 0);  // router lifetime expired
+    s.run(ARM + 20000, Ping::REPLY);
+    check(fake::sessions_created == 0, "an expired router (lifetime 0) is not a target");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::aa", 2, 1800);  // learned on another netif (e.g. the softAP)
+    fake::set_router(1, "fe80::1", 1, 1800);   // learned on the default netif
+    s.arm();
+    check(fake::target_is("fe80::1") && fake::session_interface == 2,
+          "a router on the default interface is preferred over one on another interface");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::aa", 2, 1800);  // the only router is on another netif
+    s.arm();
+    check(fake::target_is("fe80::aa") && fake::session_interface == 3,
+          "failing that, any live router - bound to its own interface");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(1, "fe80::1", 1, 1800);
+    s.arm();
+    const int before = fake::sessions_created;
+    fake::set_router(0, "fe80::2", 1, 1800);  // a second router, in an earlier slot
+    s.run(30000, Ping::REPLY);
+    check(fake::sessions_created == before && fake::target_is("fe80::1"),
+          "a second router appearing does not tear down a healthy session");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    fake::set_router(0, "fe80::1", 1, 1800);
+    s.arm();
+    fake::clear_routers();
+    fake::set_router(1, "fe80::2", 1, 1800);  // the old router is gone, a new one took over
+    s.run(10000, Ping::REPLY);
+    check(fake::target_is("fe80::2"), "follows the default router when it changes");
+  }
+  {
+    Sim s;
+    fake::gateway = 0;
+    s.wd.set_target_str("fe80::1");
+    s.arm();
+    check(fake::target_is("fe80::1") && fake::session_interface == 2,
+          "a static link-local target is bound to the default interface");
+  }
+  {
+    Sim s;
+    s.wd.set_target_str("2001:db8::1");
+    s.arm();
+    check(fake::target_is("2001:db8::1") && fake::session_interface == 2,
+          "a static global IPv6 target overrides the IPv4 gateway");
+  }
+  {
+    // Config validation rejects a %zone suffix, but should one arrive anyway,
+    // lwIP drops a name it does not know and the session still goes out of
+    // the default interface rather than nowhere.
+    Sim s;
+    fake::gateway = 0;
+    s.wd.set_target_str("fe80::1%wlan0");
+    s.arm();
+    check(fake::target_is("fe80::1") && fake::session_interface == 2,
+          "a zone suffix lwIP cannot match still pings out of the default interface");
+  }
+#endif
 
   std::printf("\n%s", failures ? "FAILED" : "all passed");
   std::printf("\n");
