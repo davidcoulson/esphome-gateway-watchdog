@@ -76,6 +76,15 @@ void set_router(int slot, const char *addr, uint8_t netif_num, uint32_t lifetime
 void clear_routers() {
   for (int i = 0; i < LWIP_ND6_NUM_ROUTERS; i++) default_router_list[i] = {};
 }
+namespace {
+struct NodeAddr { ip6_addr_t addr; bool preferred; };
+std::vector<NodeAddr> node_addrs;
+}  // namespace
+void add_node_addr(const char *addr, bool preferred) {
+  ip_addr_t parsed;
+  ipaddr_aton(addr, &parsed);
+  node_addrs.push_back({parsed.u_addr.ip6, preferred});
+}
 bool target_is(const char *addr) {
   ip_addr_t want;
   if (ipaddr_aton(addr, &want) != 1 || want.type != IPADDR_TYPE_V6 || session_target.type != IPADDR_TYPE_V6)
@@ -93,6 +102,7 @@ void reset_all(bool keep_nvs) {
   lwip_locks_taken = 0; default_ifindex = 2;
 #if LWIP_IPV6
   clear_routers();
+  node_addrs.clear();
 #endif
   delete live; live = nullptr;
 }
@@ -146,6 +156,25 @@ struct esp_netif_t { int unused; };
 static esp_netif_t the_netif;
 esp_netif_t *esp_netif_get_default_netif() { return fake::have_default_netif ? &the_netif : nullptr; }
 int esp_netif_get_netif_impl_index(esp_netif_t *) { return fake::default_ifindex; }
+// One esp_netif (the default one), as on a WiFi-only node.
+esp_netif_t *esp_netif_find_if(esp_netif_find_predicate_t fn, void *ctx) {
+  return fn(&the_netif, ctx) ? &the_netif : nullptr;
+}
+#if LWIP_IPV6
+esp_ip6_addr_type_t esp_netif_ip6_get_addr_type(const esp_ip6_addr_t *a) {
+  const uint32_t first = ntohl(a->addr[0]);
+  if ((first & 0xffc00000UL) == 0xfe800000UL) return ESP_IP6_ADDR_IS_LINK_LOCAL;
+  if ((first & 0xfe000000UL) == 0xfc000000UL) return ESP_IP6_ADDR_IS_UNIQUE_LOCAL;
+  if ((first & 0xe0000000UL) == 0x20000000UL) return ESP_IP6_ADDR_IS_GLOBAL;
+  return ESP_IP6_ADDR_IS_UNKNOWN;
+}
+int esp_netif_get_all_preferred_ip6(esp_netif_t *, esp_ip6_addr_t out[]) {
+  int n = 0;
+  for (const auto &a : fake::node_addrs)
+    if (a.preferred && n < LWIP_IPV6_NUM_ADDRESSES) out[n++] = a.addr;
+  return n;
+}
+#endif
 #if LWIP_IPV6
 struct nd6_router_list_entry default_router_list[LWIP_ND6_NUM_ROUTERS];
 #endif

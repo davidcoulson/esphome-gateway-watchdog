@@ -89,6 +89,7 @@ gateway_watchdog:
   max_reboots: 2          # cap; 0 = unlimited, keep rebooting until it clears
   budget_reset_after: 1h  # this long with no expired window returns the budget
   arm_delay: 60s          # ignore everything for this long after boot
+  prefix_router: false    # IPv6: watch <prefix>::1 instead of a fe80:: router
   update_interval: 60s    # how often the sensors publish
 
 sensor:
@@ -142,6 +143,37 @@ exactly the one to keep pinging.
 link-local (`fe80::1`). No `%zone` suffix: lwIP would look the name up among
 its own interface names (ESP-IDF's `st1`, `en1`), not the `wlan0`/`eth0` you
 would write, and the zone is never needed — see below.
+
+**`prefix_router: true` — watch `<prefix>::1` instead of the link-local
+router.** Router advertisements always come from the router's link-local
+address, so that is what the default router is, and many routers and firewalls
+do not answer echo requests on it. Watching it then reads as 100% packet loss
+forever: the watchdog never arms, so it never reboots, but it never protects
+anything either. With `prefix_router`, a `fe80::` default router (or a
+link-local static `target:`) is replaced by `::1` in the node's own /64 — on
+most networks the router's address on the VLAN — so one include covers every
+VLAN with no hard-coded gateway:
+
+```yaml
+network:
+  enable_ipv6: true
+gateway_watchdog:
+  prefix_router: true
+```
+
+- **Which /64**: from the node's *preferred* addresses (a prefix being
+  deprecated after an ISP renumber is never picked), a ULA (`fd…`) before a
+  global one — it never renumbers, and it exists even with no upstream IPv6.
+- **No default router at all** — a network with no upstream IPv6, where the
+  router advertises its prefix with a router lifetime of 0 — `<prefix>::1` is
+  still derived, on the default interface.
+- **No prefix yet** (the node only has its link-local address): the router
+  itself is watched until an address arrives, then the target switches.
+- An IPv4 gateway still wins on a dual-stack node, as without the option.
+- Rejected at config time without `enable_ipv6: true`, or together with a
+  `target:` that is not link-local, where it would silently do nothing.
+
+If the router does not sit at `::1`, set `target:` to its address instead.
 
 **IPv6 sessions are bound to their interface.** The default router is a
 link-local address, and `esp_ping` passes the target to the socket layer

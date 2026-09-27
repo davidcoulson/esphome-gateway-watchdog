@@ -39,6 +39,9 @@ bool session_live();
 void set_router(int slot, const char *addr, uint8_t netif_num, uint32_t lifetime);
 void clear_routers();
 bool target_is(const char *addr);                        // session_target == addr (IPv6)
+// The default netif's own IPv6 addresses. A deprecated one is valid but not
+// preferred, so esp_netif_get_all_preferred_ip6() leaves it out.
+void add_node_addr(const char *addr, bool preferred = true);
 #endif
 
 void reset_all(bool keep_nvs);

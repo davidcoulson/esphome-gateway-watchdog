@@ -36,6 +36,44 @@ static const uint32_t STALL_FACTOR = 4;
 // reconnect), not that the gateway is down. Rebuild rather than reboot.
 static const uint32_t CALLBACK_STALL_FACTOR = 6;
 
+#if LWIP_IPV6
+static bool netif_has_index(esp_netif_t *netif, void *ctx) {
+  return (uint32_t) esp_netif_get_netif_impl_index(netif) == *static_cast<uint32_t *>(ctx);
+}
+
+// <prefix>::1 of this node's own /64 on the interface with lwIP index
+// `ifindex` - on most networks, the router's address on the VLAN.
+//
+// Which prefix, when the node has several:
+//   - preferred addresses only (esp_netif_get_all_preferred_ip6): a prefix
+//     being phased out after an ISP renumber is deprecated first, and must
+//     not become the new target;
+//   - a ULA (fc00::/7) before a global one: it never changes when the ISP
+//     renumbers, and it exists even with no upstream IPv6 at all.
+// SLAAC addresses are always /64, so the prefix is the first 64 bits.
+static bool prefix_router_address(uint32_t ifindex, ip_addr_t *out) {
+  esp_netif_t *netif = esp_netif_find_if(netif_has_index, &ifindex);
+  if (netif == nullptr)
+    return false;
+  esp_ip6_addr_t addrs[LWIP_IPV6_NUM_ADDRESSES];
+  const int count = esp_netif_get_all_preferred_ip6(netif, addrs);
+  for (const esp_ip6_addr_type_t want : {ESP_IP6_ADDR_IS_UNIQUE_LOCAL, ESP_IP6_ADDR_IS_GLOBAL}) {
+    for (int i = 0; i < count; i++) {
+      if (esp_netif_ip6_get_addr_type(&addrs[i]) != want)
+        continue;
+      ip6_addr_t router{};  // zone-less: a ULA or global address is not scoped
+      router.addr[0] = addrs[i].addr[0];
+      router.addr[1] = addrs[i].addr[1];
+      router.addr[2] = 0;
+      router.addr[3] = PP_HTONL(1);
+      ip_addr_copy_from_ip6(*out, router);
+      return true;
+    }
+  }
+  return false;
+}
+#endif
+
 static void ping_success_cb(esp_ping_handle_t hdl, void *args) {
   uint32_t elapsed = 0;
   esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed, sizeof(elapsed));
@@ -81,6 +119,11 @@ bool GatewayWatchdog::resolve_target_(ip_addr_t *out, uint32_t *ifindex) {
       if (netif == nullptr)
         return false;
       *ifindex = (uint32_t) esp_netif_get_netif_impl_index(netif);
+      // prefix_router: a link-local literal stands in for "the router on
+      // this VLAN"; watch its address in the node's own /64 when there is
+      // one, else keep the literal.
+      if (this->prefix_router_ && ip6_addr_islinklocal(ip_2_ip6(out)))
+        (void) prefix_router_address(*ifindex, out);
     }
 #endif
     return true;
@@ -144,6 +187,24 @@ bool GatewayWatchdog::resolve_target_(ip_addr_t *out, uint32_t *ifindex) {
       ip_addr_copy_from_ip6(*out, router.neighbor_entry->next_hop_address);
       *ifindex = netif_get_index(router.neighbor_entry->netif);
     }
+  }
+
+  // prefix_router: watch <prefix>::1 of the node's own /64 instead of the
+  // router's link-local address - on the router's interface when there is
+  // one, else the default interface. The second case is the point on a
+  // network with no upstream IPv6: the router advertises its prefix with a
+  // router lifetime of 0, so no default router is ever learned, yet the
+  // node still has an address in the prefix to derive the target from.
+  //
+  // Outside the lock: esp_netif_get_all_preferred_ip6() is an esp_netif API.
+  if (this->prefix_router_) {
+    const uint32_t index = chosen >= 0 ? *ifindex : default_index;
+    if (prefix_router_address(index, out)) {
+      *ifindex = index;
+      return true;
+    }
+    // No ULA or global address yet (still link-local only): fall back to
+    // the router itself, if there is one, rather than watch nothing.
   }
   if (chosen >= 0)
     return true;
@@ -435,6 +496,8 @@ void GatewayWatchdog::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Target: default gateway (DHCPv4, else IPv6 default router)");
   }
+  if (this->prefix_router_)
+    ESP_LOGCONFIG(TAG, "  Prefix router: link-local routers replaced by <prefix>::1 of this node's /64");
   ESP_LOGCONFIG(TAG, "  Ping interval: %" PRIu32 " ms", this->ping_interval_);
   ESP_LOGCONFIG(TAG, "  Ping timeout: %" PRIu32 " ms", this->ping_timeout_);
   ESP_LOGCONFIG(TAG, "  Reboot window: %" PRIu32 " ms", this->reboot_window_);

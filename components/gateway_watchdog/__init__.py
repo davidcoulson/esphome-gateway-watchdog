@@ -33,6 +33,7 @@ CONF_REBOOT = "reboot"
 CONF_MAX_REBOOTS = "max_reboots"
 CONF_BUDGET_RESET_AFTER = "budget_reset_after"
 CONF_ARM_DELAY = "arm_delay"
+CONF_PREFIX_ROUTER = "prefix_router"
 
 
 def _validate(config):
@@ -98,12 +99,29 @@ def _final_validate(config):
     runtime and the watchdog never starts a session - no error, no pings.
     """
     target = config.get(CONF_TARGET)
-    if isinstance(target, IPv6Address):
-        network = fv.full_config.get().get("network", {})
-        if not network.get(CONF_ENABLE_IPV6, False):
+    ipv6_enabled = (
+        fv.full_config.get().get("network", {}).get(CONF_ENABLE_IPV6, False)
+    )
+    if isinstance(target, IPv6Address) and not ipv6_enabled:
+        raise cv.Invalid(
+            f"{CONF_TARGET} {target} is an IPv6 address, which needs "
+            f"'network: {CONF_ENABLE_IPV6}: true'"
+        )
+    if config[CONF_PREFIX_ROUTER]:
+        if not ipv6_enabled:
             raise cv.Invalid(
-                f"{CONF_TARGET} {target} is an IPv6 address, which needs "
+                f"{CONF_PREFIX_ROUTER} is an IPv6 option, which needs "
                 f"'network: {CONF_ENABLE_IPV6}: true'"
+            )
+        # It only ever replaces a link-local address. With any other static
+        # target it would silently do nothing, which reads as working.
+        if target is not None and not (
+            isinstance(target, IPv6Address) and target.is_link_local
+        ):
+            raise cv.Invalid(
+                f"{CONF_PREFIX_ROUTER} replaces a link-local target (fe80::/10) "
+                f"with <prefix>::1; with {CONF_TARGET}: {target} it would do "
+                f"nothing. Drop one of them."
             )
     return config
 
@@ -147,6 +165,12 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(
                 CONF_ARM_DELAY, default="60s"
             ): cv.positive_time_period_milliseconds,
+            # IPv6: watch <prefix>::1 of the node's own /64 instead of the
+            # router's link-local address, and derive it even when no default
+            # router is advertised (a network with no upstream IPv6). One
+            # include then covers every VLAN whose router sits at ::1, with
+            # no hard-coded gateway. A ULA prefix is used before a global one.
+            cv.Optional(CONF_PREFIX_ROUTER, default=False): cv.boolean,
         }
     ).extend(cv.polling_component_schema("60s")),
     _validate,
@@ -166,3 +190,4 @@ async def to_code(config):
     cg.add(var.set_max_reboots(config[CONF_MAX_REBOOTS]))
     cg.add(var.set_budget_reset_after(config[CONF_BUDGET_RESET_AFTER]))
     cg.add(var.set_arm_delay(config[CONF_ARM_DELAY]))
+    cg.add(var.set_prefix_router(config[CONF_PREFIX_ROUTER]))
