@@ -47,9 +47,12 @@ class GatewayWatchdog : public PollingComponent {
   void on_timeout();
 
  protected:
-  uint32_t resolve_target_();
+  // Fills *out with the address to watch: the static target if configured,
+  // else the IPv4 default gateway, else (IPv6-only network) the first live
+  // ND6 default router. False when there is nothing to watch yet.
+  bool resolve_target_(ip_addr_t *out);
   void save_budget_();
-  bool start_session_(uint32_t addr);
+  bool start_session_(const ip_addr_t &addr);
   void stop_session_();
 
   const char *target_str_{nullptr};
@@ -65,7 +68,7 @@ class GatewayWatchdog : public PollingComponent {
   uint32_t arm_delay_{60000};
 
   esp_ping_handle_t handle_{nullptr};
-  uint32_t target_addr_{0};
+  ip_addr_t target_addr_{};
 
   // Written from the ping task, read from the main loop. Both are 32-bit
   // scalars, which are atomic on this target; the counters are only ever

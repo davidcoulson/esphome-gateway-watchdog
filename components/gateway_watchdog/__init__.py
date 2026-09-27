@@ -59,9 +59,10 @@ CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(GatewayWatchdog),
-            # Omit to track the DHCP-supplied default gateway, which is
-            # what makes one include work unmodified across every VLAN.
-            cv.Optional(CONF_TARGET): cv.ipv4address,
+            # Omit to track the default gateway (the DHCPv4 one, or on an
+            # IPv6-only network the RA default router), which is what makes
+            # one include work unmodified across every VLAN.
+            cv.Optional(CONF_TARGET): cv.Any(cv.ipv4address, cv.ipv6address),
             cv.Optional(
                 CONF_REBOOT_WINDOW, default="300s"
             ): cv.positive_time_period_milliseconds,

@@ -11,6 +11,11 @@
 #include "esphome/components/network/util.h"
 
 #include "esp_netif.h"
+#if LWIP_IPV6
+// default_router_list[]: lwIP keeps the ND6 default routers in a private
+// table with no public accessor. ESP-IDF ships the header.
+#include "lwip/priv/nd6_priv.h"
+#endif
 
 namespace esphome {
 namespace gateway_watchdog {
@@ -55,15 +60,13 @@ void GatewayWatchdog::on_timeout() {
   this->timeouts_ = this->timeouts_ + 1;
 }
 
-uint32_t GatewayWatchdog::resolve_target_() {
+bool GatewayWatchdog::resolve_target_(ip_addr_t *out) {
   if (this->target_str_ != nullptr) {
-    ip4_addr_t parsed;
-    if (ip4addr_aton(this->target_str_, &parsed) == 1)
-      return parsed.addr;
-    return 0;
+    // ipaddr_aton() parses both IPv4 and IPv6 literals.
+    return ipaddr_aton(this->target_str_, out) == 1;
   }
-  // No explicit target: follow the DHCP-supplied default gateway, so the
-  // same config works on every VLAN and re-targets if the lease changes.
+  // No explicit target: follow the default gateway, so the same config works
+  // on every VLAN and re-targets if the lease or the router changes.
   //
   // esp_netif_get_default_netif() rather than a hardcoded "WIFI_STA_DEF"
   // key: that key does not exist on an Ethernet-only node, and asking for
@@ -71,11 +74,29 @@ uint32_t GatewayWatchdog::resolve_target_() {
   // both. Returns whichever interface actually carries the default route.
   esp_netif_t *netif = esp_netif_get_default_netif();
   if (netif == nullptr)
-    return 0;
+    return false;
   esp_netif_ip_info_t info;
-  if (esp_netif_get_ip_info(netif, &info) != ESP_OK)
-    return 0;
-  return info.gw.addr;
+  if (esp_netif_get_ip_info(netif, &info) == ESP_OK && info.gw.addr != 0) {
+    ip_addr_set_ip4_u32_val(*out, info.gw.addr);
+    return true;
+  }
+#if LWIP_IPV6
+  // No IPv4 gateway (no DHCPv4 lease, e.g. an IPv6-only network): watch the
+  // first live IPv6 default router learned from router advertisements. Its
+  // address is the router's link-local, which is exactly what the node
+  // forwards through, so ICMPv6 echo to it is the same reachability test.
+  {
+    LwIPLock lock;
+    for (int i = 0; i < LWIP_ND6_NUM_ROUTERS; i++) {
+      const auto &router = default_router_list[i];
+      if (router.neighbor_entry != nullptr && router.invalidation_timer > 0) {
+        ip_addr_copy_from_ip6(*out, router.neighbor_entry->next_hop_address);
+        return true;
+      }
+    }
+  }
+#endif
+  return false;
 }
 
 void GatewayWatchdog::stop_session_() {
@@ -87,20 +108,12 @@ void GatewayWatchdog::stop_session_() {
   this->armed_ = false;
 }
 
-bool GatewayWatchdog::start_session_(uint32_t addr) {
+bool GatewayWatchdog::start_session_(const ip_addr_t &addr) {
   this->stop_session_();
 
-  ip_addr_t target;
-  memset(&target, 0, sizeof(target));
-#if LWIP_IPV6
-  target.type = IPADDR_TYPE_V4;
-  target.u_addr.ip4.addr = addr;
-#else
-  target.addr = addr;
-#endif
-
+  // esp_ping picks ICMP or ICMPv6 from the address type.
   esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
-  cfg.target_addr = target;
+  cfg.target_addr = addr;
   cfg.count = ESP_PING_COUNT_INFINITE;
   cfg.interval_ms = this->ping_interval_;
   cfg.timeout_ms = this->ping_timeout_;
@@ -127,7 +140,7 @@ bool GatewayWatchdog::start_session_(uint32_t addr) {
   this->last_reply_ms_ = millis();
   this->last_callback_ms_ = millis();
   this->session_rebuilt_for_window_ = false;
-  ESP_LOGI(TAG, "watching " IPSTR, IP2STR((esp_ip4_addr_t *) &addr));
+  ESP_LOGI(TAG, "watching %s", ipaddr_ntoa(&addr));
   return true;
 }
 
@@ -197,13 +210,13 @@ void GatewayWatchdog::loop() {
     return;
   }
 
-  const uint32_t addr = this->resolve_target_();
-  if (addr == 0) {
+  ip_addr_t addr;
+  if (!this->resolve_target_(&addr)) {
     this->last_reply_ms_ = now;
     return;
   }
 
-  if (this->handle_ == nullptr || addr != this->target_addr_) {
+  if (this->handle_ == nullptr || !ip_addr_cmp(&addr, &this->target_addr_)) {
     this->start_session_(addr);
     return;
   }
@@ -325,7 +338,7 @@ void GatewayWatchdog::dump_config() {
   if (this->target_str_ != nullptr) {
     ESP_LOGCONFIG(TAG, "  Target: %s (static)", this->target_str_);
   } else {
-    ESP_LOGCONFIG(TAG, "  Target: DHCP default gateway");
+    ESP_LOGCONFIG(TAG, "  Target: default gateway (DHCPv4, else IPv6 default router)");
   }
   ESP_LOGCONFIG(TAG, "  Ping interval: %" PRIu32 " ms", this->ping_interval_);
   ESP_LOGCONFIG(TAG, "  Ping timeout: %" PRIu32 " ms", this->ping_timeout_);
