@@ -285,9 +285,10 @@ void GatewayWatchdog::setup() {
   uint32_t stored = 0;
   if (this->pref_.load(&stored))
     this->reboots_used_ = stored;
-  if (this->reboots_used_ > 0)
+  if (this->reboots_used_ > 0) {
     ESP_LOGW(TAG, "restored reboot budget: %" PRIu32 " of %" PRIu32 " used",
              this->reboots_used_, this->max_reboots_);
+  }
 }
 
 void GatewayWatchdog::save_budget_() {
@@ -496,8 +497,9 @@ void GatewayWatchdog::dump_config() {
   } else {
     ESP_LOGCONFIG(TAG, "  Target: default gateway (DHCPv4, else IPv6 default router)");
   }
-  if (this->prefix_router_)
+  if (this->prefix_router_) {
     ESP_LOGCONFIG(TAG, "  Prefix router: link-local routers replaced by <prefix>::1 of this node's /64");
+  }
   ESP_LOGCONFIG(TAG, "  Ping interval: %" PRIu32 " ms", this->ping_interval_);
   ESP_LOGCONFIG(TAG, "  Ping timeout: %" PRIu32 " ms", this->ping_timeout_);
   ESP_LOGCONFIG(TAG, "  Reboot window: %" PRIu32 " ms", this->reboot_window_);
