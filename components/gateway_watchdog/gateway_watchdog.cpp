@@ -36,6 +36,22 @@ static const uint32_t STALL_FACTOR = 4;
 // reconnect), not that the gateway is down. Rebuild rather than reboot.
 static const uint32_t CALLBACK_STALL_FACTOR = 6;
 
+// Milliseconds from `then` to `now`, or 0 if `then` is later.
+//
+// The ping callbacks run on ESP-IDF's ping task and stamp last_callback_ms_ /
+// last_reply_ms_ with their own millis(). That task can run between loop()
+// reading millis() into `now` and using it, so a stamp can be a millisecond or
+// two AHEAD of `now`. Plain unsigned subtraction turned that into 4294967295 ms:
+// a healthy session logged "no ping callbacks for 4294967295 ms" and was
+// rebuilt, and the same wrap on the reply stamp read as an expired reboot
+// window - twice in one window, and a healthy node rebooted. The signed
+// difference is still right across the 49.7-day millis() wrap for any
+// interval under ~24 days, far beyond any window here.
+static inline uint32_t elapsed_ms(uint32_t now, uint32_t then) {
+  const int32_t d = static_cast<int32_t>(now - then);
+  return d < 0 ? 0 : static_cast<uint32_t>(d);
+}
+
 #if LWIP_IPV6
 static bool netif_has_index(esp_netif_t *netif, void *ctx) {
   return (uint32_t) esp_netif_get_netif_impl_index(netif) == *static_cast<uint32_t *>(ctx);
@@ -373,7 +389,7 @@ void GatewayWatchdog::loop() {
   // timeout. Total silence means the session died rather than the gateway.
   // Rebuild it; start_session_ clears armed_, so the node must reach the
   // gateway again before a reboot is even on the table.
-  const uint32_t silence = now - this->last_callback_ms_;
+  const uint32_t silence = elapsed_ms(now, this->last_callback_ms_);
   if (silence > this->ping_interval_ * CALLBACK_STALL_FACTOR) {
     ESP_LOGW(TAG, "no ping callbacks for %" PRIu32 " ms - rebuilding session", silence);
     this->start_session_(addr, ifindex);
@@ -397,10 +413,10 @@ void GatewayWatchdog::loop() {
   // rebooting. The loop-stall and link-down credits also move last_reply_ms_,
   // which can only err towards another rebuild instead of a reboot.
   if (this->session_rebuilt_for_window_ &&
-      (this->last_reply_ms_ - this->rebuilt_at_ms_) > this->reboot_window_)
+      elapsed_ms(this->last_reply_ms_, this->rebuilt_at_ms_) > this->reboot_window_)
     this->session_rebuilt_for_window_ = false;
 
-  const uint32_t since = now - this->last_reply_ms_;
+  const uint32_t since = elapsed_ms(now, this->last_reply_ms_);
   if (since <= this->reboot_window_)
     return;
 

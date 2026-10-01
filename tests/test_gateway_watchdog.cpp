@@ -258,6 +258,31 @@ int main() {
     check(fake::target_v4() == GW2, "the watchdog keeps working straight through a millis() wrap");
   }
 
+  std::printf("\n== a callback stamp ahead of loop()'s clock ==\n");
+  {
+    // The ping task can run between loop() reading millis() and using it.
+    // A reply that lands then, after the millisecond ticked, stamps a time
+    // one ms AHEAD of loop's `now`, and `now - stamp` used to wrap to
+    // 4294967295: "no ping callbacks for 4294967295 ms - rebuilding session"
+    // on a healthy node, seen on hardware. The same wrap on the reply stamp
+    // read as an expired reboot window, and a second one could reboot.
+    Sim s;
+    s.arm();
+    const int sessions = fake::sessions_created;
+    for (int i = 0; i < 120; i++) {         // ten minutes of 5 s pings
+      fake::now_ms += 1;
+      fake::ping_reply();                   // the ping task stamps now + 1 ...
+      fake::now_ms -= 1;
+      s.wd.loop();                          // ... after loop() read `now`
+      s.run(INTERVAL, Ping::SILENT);        // then the rest of the interval
+    }
+    check(fake::count_logs("no ping callbacks") == 0,
+          "a stamp 1 ms ahead is not 4294967295 ms of silence");
+    check(fake::count_logs("unreachable") == 0 && fake::sessions_created == sessions,
+          "nor an expired reboot window - the session is left alone");
+    check(fake::reboots == 0 && s.wd.armed_, "and the node stays armed, with no reboot");
+  }
+
   std::printf("\n== ping session management ==\n");
   {
     Sim s;
