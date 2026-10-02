@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# The job only checks out and runs the host tests.
+permissions:
+  contents: read
+
 jobs:
   host-tests:
     runs-on: ubuntu-latest
