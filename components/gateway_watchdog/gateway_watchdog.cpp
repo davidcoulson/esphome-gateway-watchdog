@@ -91,13 +91,20 @@ static bool prefix_router_address(uint32_t ifindex, ip_addr_t *out) {
 #endif
 
 static void ping_success_cb(esp_ping_handle_t hdl, void *args) {
+  auto *ctx = static_cast<GatewayWatchdog::PingContext *>(args);
+  // Checked before touching the handle: a stale session may already be deleted.
+  if (!ctx->self->is_live_session(ctx->session.load()))
+    return;
   uint32_t elapsed = 0;
   esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed, sizeof(elapsed));
-  static_cast<GatewayWatchdog *>(args)->on_reply(elapsed);
+  ctx->self->on_reply(elapsed);
 }
 
 static void ping_timeout_cb(esp_ping_handle_t hdl, void *args) {
-  static_cast<GatewayWatchdog *>(args)->on_timeout();
+  auto *ctx = static_cast<GatewayWatchdog::PingContext *>(args);
+  if (!ctx->self->is_live_session(ctx->session.load()))
+    return;
+  ctx->self->on_timeout();
 }
 
 void GatewayWatchdog::on_reply(uint32_t elapsed_ms) {
@@ -229,6 +236,9 @@ bool GatewayWatchdog::resolve_target_(ip_addr_t *out, uint32_t *ifindex) {
 }
 
 void GatewayWatchdog::stop_session_() {
+  // Withdraw it from the ping task first, so nothing it delivers from here on
+  // counts.
+  this->live_session_.store(0);
   if (this->handle_ != nullptr) {
     esp_ping_stop(this->handle_);
     esp_ping_delete_session(this->handle_);
@@ -258,9 +268,17 @@ bool GatewayWatchdog::start_session_(const ip_addr_t &addr, uint32_t ifindex) {
   cfg.interval_ms = this->ping_interval_;
   cfg.timeout_ms = this->ping_timeout_;
 
+  // Never 0, which means "no session".
+  if (++this->next_session_ == 0)
+    this->next_session_ = 1;
+  const uint32_t session = this->next_session_;
+  PingContext &ctx = this->ping_contexts_[session % this->ping_contexts_.size()];
+  ctx.self = this;
+  ctx.session.store(session);
+
   esp_ping_callbacks_t cbs;
   memset(&cbs, 0, sizeof(cbs));
-  cbs.cb_args = this;
+  cbs.cb_args = &ctx;
   cbs.on_ping_success = ping_success_cb;
   cbs.on_ping_timeout = ping_timeout_cb;
 
@@ -269,7 +287,10 @@ bool GatewayWatchdog::start_session_(const ip_addr_t &addr, uint32_t ifindex) {
     ESP_LOGW(TAG, "esp_ping_new_session failed");
     return false;
   }
+  // Published before start: the first callback can arrive as soon as it runs.
+  this->live_session_.store(session);
   if (esp_ping_start(this->handle_) != ESP_OK) {
+    this->live_session_.store(0);
     esp_ping_delete_session(this->handle_);
     this->handle_ = nullptr;
     ESP_LOGW(TAG, "esp_ping_start failed");

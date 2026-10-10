@@ -31,6 +31,8 @@ extern int default_ifindex;                              // default netif's lwIP
 extern uint32_t next_rtt_ms;
 void ping_reply();                                       // fire the live session's success cb
 void ping_timeout();                                     // fire its timeout cb
+void stale_reply();                                      // fire the last DELETED session's success cb
+void stale_timeout();                                    // and its timeout cb
 bool session_live();
 
 #if LWIP_IPV6

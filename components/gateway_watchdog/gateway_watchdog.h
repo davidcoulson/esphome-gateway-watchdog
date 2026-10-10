@@ -2,6 +2,8 @@
 
 #ifdef USE_ESP32
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <cinttypes>
 
@@ -46,6 +48,16 @@ class GatewayWatchdog : public PollingComponent {
   // Called from the esp_ping task.
   void on_reply(uint32_t elapsed_ms);
   void on_timeout();
+  /// What each ping session's callbacks are given: the component, and which
+  /// session they belong to.
+  struct PingContext {
+    GatewayWatchdog *self{nullptr};
+    std::atomic<uint32_t> session{0};
+  };
+  /// True when `session` is the one currently being watched. The ping
+  /// callbacks check this first, so one from a session that has just been
+  /// stopped or replaced is ignored instead of stamping the new one.
+  bool is_live_session(uint32_t session) const { return session != 0 && session == this->live_session_.load(); }
 
  protected:
   // Fills *out with the address to watch - the static target if configured,
@@ -75,6 +87,18 @@ class GatewayWatchdog : public PollingComponent {
   bool prefix_router_{false};
 
   esp_ping_handle_t handle_{nullptr};
+  // Which session the ping task's callbacks may act for: published before
+  // esp_ping_start(), withdrawn (0) before esp_ping_stop(). A callback that
+  // was already running when its session was torn down carries an older
+  // number, so it cannot arm the replacement or refresh its reply clock.
+  //
+  // A number, not the esp_ping handle: the handle is a heap pointer, and a
+  // new session often gets the address the deleted one just freed. Each
+  // session's context comes from a small ring owned by this component, so
+  // nothing a late callback can still read is ever freed.
+  std::atomic<uint32_t> live_session_{0};
+  uint32_t next_session_{0};
+  std::array<PingContext, 4> ping_contexts_{};
   ip_addr_t target_addr_{};
   // Part of the target's identity: the same link-local router address on a
   // different interface is a different router.

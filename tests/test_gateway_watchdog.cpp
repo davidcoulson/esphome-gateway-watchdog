@@ -121,6 +121,39 @@ int main() {
     check(fake::count_logs("loop starved") == 0, "the arm delay is not reported as a loop stall");
   }
 
+  std::printf("\n== stale callbacks from a replaced session ==\n");
+  {
+    // esp_ping calls back from its own task, so a reply already in flight
+    // when the main loop replaces the session can land afterwards. It must
+    // not count for the new target.
+    Sim s;
+    s.arm();
+    check(s.wd.armed_, "armed on the first gateway");
+    fake::gateway = GW2;  // new lease: the session is replaced
+    s.wd.loop();
+    check(fake::sessions_deleted == 1 && fake::target_v4() == GW2 && !s.wd.armed_,
+          "a new gateway gets a new, unarmed session");
+    fake::stale_reply();
+    fake::stale_timeout();
+    check(!s.wd.armed_, "a late reply from the old session does not arm the new one");
+    fake::ping_reply();
+    check(s.wd.armed_, "a reply from the live session still does");
+  }
+  {
+    // A dead session's late timeouts must not hide that the live one is silent.
+    Sim s;
+    s.arm();
+    fake::gateway = GW2;
+    s.wd.loop();
+    const int created = fake::sessions_created;
+    for (int i = 0; i < 12; i++) {  // a minute of stale timeouts, live session silent
+      fake::now_ms += INTERVAL;
+      fake::stale_timeout();
+      s.wd.loop();
+    }
+    check(fake::sessions_created > created, "stale timeouts do not keep a silent live session alive");
+  }
+
   std::printf("\n== loop stalls (e.g. an OTA write blocking the main loop) ==\n");
   {
     Sim s;

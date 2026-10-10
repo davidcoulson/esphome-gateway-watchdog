@@ -46,6 +46,10 @@ struct Session {
   int token = 0;
 };
 Session *live = nullptr;
+// The last deleted session's callbacks and handle value, for stale callbacks.
+// The handle is only ever compared, never dereferenced.
+esp_ping_callbacks_t deleted_cbs{};
+void *deleted_handle = nullptr;
 }  // namespace
 
 bool session_live() { return live != nullptr && live->started; }
@@ -54,6 +58,12 @@ void ping_reply() {
 }
 void ping_timeout() {
   if (session_live() && live->cbs.on_ping_timeout) live->cbs.on_ping_timeout(live, live->cbs.cb_args);
+}
+void stale_reply() {
+  if (deleted_cbs.on_ping_success) deleted_cbs.on_ping_success(deleted_handle, deleted_cbs.cb_args);
+}
+void stale_timeout() {
+  if (deleted_cbs.on_ping_timeout) deleted_cbs.on_ping_timeout(deleted_handle, deleted_cbs.cb_args);
 }
 
 #if LWIP_IPV6
@@ -100,6 +110,7 @@ void reset_all(bool keep_nvs) {
   fail_new_session = fail_start = false;
   sessions_created = sessions_deleted = 0; session_target = ip_addr_t{}; session_interface = 0; next_rtt_ms = 3;
   lwip_locks_taken = 0; default_ifindex = 2;
+  deleted_cbs = {}; deleted_handle = nullptr;
 #if LWIP_IPV6
   clear_routers();
   node_addrs.clear();
@@ -144,7 +155,13 @@ esp_err_t esp_ping_stop(esp_ping_handle_t h) {
   return ESP_OK;
 }
 esp_err_t esp_ping_delete_session(esp_ping_handle_t h) {
-  if (h == fake::live && fake::live) { delete fake::live; fake::live = nullptr; fake::sessions_deleted++; }
+  if (h == fake::live && fake::live) {
+    fake::deleted_cbs = fake::live->cbs;
+    fake::deleted_handle = fake::live;
+    delete fake::live;
+    fake::live = nullptr;
+    fake::sessions_deleted++;
+  }
   return ESP_OK;
 }
 esp_err_t esp_ping_get_profile(esp_ping_handle_t, esp_ping_profile_t, void *data, uint32_t) {
