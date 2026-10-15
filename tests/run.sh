@@ -39,3 +39,19 @@ for ipv6 in 0 1; do
   "$dir/test_$ipv6"
   echo
 done
+
+# The ESP8266 backend: raw-socket echo instead of esp_ping. Arduino lwIP2,
+# IPv4 only - the component rejects IPv6 options on this chip.
+echo "######## ESP8266 backend"
+${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -Wno-unused-parameter \
+  -DUSE_ESP8266 -DSTUB_IPV6=0 -Itests/stubs -fsyntax-only \
+  components/gateway_watchdog/gateway_watchdog.cpp
+${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -Wno-unused-parameter \
+  -DUSE_ESP8266 -DUSE_SENSOR -DSTUB_IPV6=0 \
+  -Itests/stubs \
+  components/gateway_watchdog/gateway_watchdog.cpp \
+  tests/stubs/fake.cpp \
+  tests/stubs/fake8266.cpp \
+  tests/test_esp8266.cpp \
+  -o "$dir/test_8266"
+"$dir/test_8266"

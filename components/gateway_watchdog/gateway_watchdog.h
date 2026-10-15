@@ -1,6 +1,6 @@
 #pragma once
 
-#ifdef USE_ESP32
+#if defined(USE_ESP32) || defined(USE_ESP8266)
 
 #include <array>
 #include <atomic>
@@ -16,7 +16,12 @@
 #endif
 
 #include "lwip/ip_addr.h"
+#ifdef USE_ESP32
 #include "ping/ping_sock.h"
+#else
+struct raw_pcb;
+struct pbuf;
+#endif
 
 namespace esphome {
 namespace gateway_watchdog {
@@ -45,7 +50,8 @@ class GatewayWatchdog : public PollingComponent {
   void set_reboots_used_sensor(sensor::Sensor *s) { this->reboots_used_sensor_ = s; }
 #endif
 
-  // Called from the esp_ping task.
+  // Called from the esp_ping task on the ESP32, and from lwIP's receive path
+  // or loop() itself on the ESP8266.
   void on_reply(uint32_t elapsed_ms);
   void on_timeout();
   /// What each ping session's callbacks are given: the component, and which
@@ -69,6 +75,13 @@ class GatewayWatchdog : public PollingComponent {
   void save_budget_();
   bool start_session_(const ip_addr_t &addr, uint32_t ifindex);
   void stop_session_();
+  // The platform half of a session: open_session_() starts pinging addr,
+  // close_session_() stops it, session_open_() says whether one is running.
+  // ping_tick_() runs every loop(); only the ESP8266 needs it.
+  bool open_session_(const ip_addr_t &addr, uint32_t ifindex, uint32_t session);
+  void close_session_();
+  bool session_open_() const;
+  void ping_tick_(uint32_t now);
 
   const char *target_str_{nullptr};
   uint32_t reboot_window_{120000};
@@ -86,7 +99,23 @@ class GatewayWatchdog : public PollingComponent {
   // resolve_target_().
   bool prefix_router_{false};
 
+#ifdef USE_ESP32
   esp_ping_handle_t handle_{nullptr};
+#else
+  // ESP8266: no ping task. ICMP echo is sent from loop() over a raw lwIP
+  // socket, and replies arrive through raw_recv - both on the one thread the
+  // SDK runs everything on, so nothing here races.
+  raw_pcb *pcb_{nullptr};
+  // The echo identifier, new for every session, so a reply to a request an
+  // earlier session sent cannot count for this one.
+  uint16_t echo_id_{0};
+  uint16_t echo_seq_{0};
+  bool echo_outstanding_{false};
+  uint32_t echo_sent_ms_{0};
+  uint32_t last_send_ms_{0};
+  bool sent_once_{false};
+  friend uint8_t gateway_watchdog_raw_recv(void *arg, raw_pcb *pcb, pbuf *p, const ip_addr_t *addr);
+#endif
   // Which session the ping task's callbacks may act for: published before
   // esp_ping_start(), withdrawn (0) before esp_ping_stop(). A callback that
   // was already running when its session was torn down carries an older
@@ -157,4 +186,4 @@ class GatewayWatchdog : public PollingComponent {
 }  // namespace gateway_watchdog
 }  // namespace esphome
 
-#endif  // USE_ESP32
+#endif  // USE_ESP32 || USE_ESP8266
