@@ -122,6 +122,9 @@ The config is rejected at build time if:
   then built IPv4-only, the literal would fail to parse at runtime, and the
   watchdog would silently never start.
 - `target` has a `%zone` suffix — see [IPv6](#ipv6).
+- on an ESP8266, `target` is IPv6 or `prefix_router: true` — that backend is
+  IPv4 only.
+- the platform is anything but ESP32 or ESP8266.
 
 ## IPv6
 
@@ -245,9 +248,21 @@ Measured on an ESP32-C3 (ESP-IDF 6.1.0), same node with and without:
 
 ## Requirements
 
-ESP32 family on the ESP-IDF framework. Uses ESP-IDF's `esp_ping`
-(`lwip/apps/ping/ping_sock.h`) and `esp_netif`. Not supported on ESP8266 or
-under the Arduino framework.
+**ESP32** family on the ESP-IDF framework: uses ESP-IDF's `esp_ping`
+(`lwip/apps/ping/ping_sock.h`) and `esp_netif`. Not supported under the ESP32
+Arduino framework.
+
+**ESP8266 / ESP8285**, IPv4 only. The SDK's own `ping_start()` cannot be
+stopped and pings once a second, so this backend sends ICMP echo itself from
+`loop()` over a raw lwIP socket and picks the replies out of the stack's
+receive path. Everything else - arming, the rebuild-then-reboot rule, the
+budget, the sensors - is the same code as on the ESP32. On this chip a static
+`target:` must be IPv4 and `prefix_router:` is not available; validation says
+so. Costs about 3.7 KB of flash and 0.4 KB of RAM. Compile-tested against
+ESPHome 2026.9.1 (Arduino core 3.1.2) on an Athom E14 bulb config; not yet run
+on hardware.
+
+Other platforms (RP2040, LibreTiny) are rejected at validation.
 
 Works on **WiFi and Ethernet** nodes. It depends on `network` rather than
 `wifi`, resolves the gateway from `esp_netif_get_default_netif()` (whichever
@@ -311,6 +326,13 @@ out of the first, so running once would never exercise it. The dual-stack run
 adds the IPv6 cases: default-router discovery under the core lock, interface
 binding, router preference and churn, expiry, static IPv6 targets, and the full
 rebuild-then-reboot path over IPv6.
+
+A third build covers the **ESP8266 backend** (`tests/test_esp8266.cpp`) with
+stubs for lwIP's raw socket, pbufs and ICMP: one request per interval with a
+valid checksum, replies matched on identifier, sequence and source, echo
+requests and other hosts' replies passed back to lwIP untouched, late replies
+dropped, timeouts and send failures counted as loss, a fresh identifier per
+session, no leaked pbufs, and the rebuild-then-reboot path end to end.
 
 ## Verified
 

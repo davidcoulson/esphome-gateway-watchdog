@@ -68,7 +68,7 @@ void stale_timeout() {
 
 #if LWIP_IPV6
 namespace {
-struct netif netifs[4] = {{0}, {1}, {2}, {3}};
+struct netif netifs[4] = {{0, {}}, {1, {}}, {2, {}}, {3, {}}};
 struct nd6_neighbor_cache_entry neighbors[LWIP_ND6_NUM_ROUTERS];
 }  // namespace
 void set_router(int slot, const char *addr, uint8_t netif_num, uint32_t lifetime) {

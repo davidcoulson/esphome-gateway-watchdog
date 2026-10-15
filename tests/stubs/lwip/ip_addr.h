@@ -92,3 +92,12 @@ inline char *ipaddr_ntoa_r(const ip_addr_t *a, char *buf, int len) {
 }
 
 #endif  // LWIP_IPV6
+
+// IPv4 helpers the ESP8266 backend uses.
+#define ip4_addr_isany(a) ((a) == nullptr || (a)->addr == 0)
+#if !LWIP_IPV6
+#define ip_addr_copy_from_ip4(dest, src) ((dest) = (src))
+#else
+#define ip_addr_copy_from_ip4(dest, src) \
+  do { (dest) = ip_addr_t{}; (dest).u_addr.ip4 = (src); (dest).type = IPADDR_TYPE_V4; } while (0)
+#endif
