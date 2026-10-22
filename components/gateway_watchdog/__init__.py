@@ -14,7 +14,8 @@ from ipaddress import IPv6Address
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.const import CONF_ENABLE_IPV6, CONF_ID
+from esphome.const import CONF_ENABLE_IPV6, CONF_ID, PLATFORM_ESP32, PLATFORM_ESP8266
+from esphome.core import CORE
 import esphome.final_validate as fv
 
 CODEOWNERS = ["@davidcoulson"]
@@ -99,6 +100,16 @@ def _final_validate(config):
     runtime and the watchdog never starts a session - no error, no pings.
     """
     target = config.get(CONF_TARGET)
+    # The ESP8266 backend pings over a raw IPv4 socket and has no router
+    # discovery: say so here rather than build a watchdog that never pings.
+    if CORE.is_esp8266:
+        if isinstance(target, IPv6Address):
+            raise cv.Invalid(
+                f"{CONF_TARGET} {target}: IPv6 targets are ESP32-only; on the "
+                f"ESP8266 use an IPv4 address or leave it out"
+            )
+        if config[CONF_PREFIX_ROUTER]:
+            raise cv.Invalid(f"{CONF_PREFIX_ROUTER} is ESP32-only")
     ipv6_enabled = (
         fv.full_config.get().get("network", {}).get(CONF_ENABLE_IPV6, False)
     )
@@ -173,6 +184,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_PREFIX_ROUTER, default=False): cv.boolean,
         }
     ).extend(cv.polling_component_schema("60s")),
+    cv.only_on([PLATFORM_ESP32, PLATFORM_ESP8266]),
     _validate,
 )
 

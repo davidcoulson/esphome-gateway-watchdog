@@ -1,6 +1,6 @@
 #include "gateway_watchdog.h"
 
-#ifdef USE_ESP32
+#if defined(USE_ESP32) || defined(USE_ESP8266)
 
 #include <cmath>
 #include <cstring>
@@ -10,12 +10,21 @@
 #include "esphome/core/helpers.h"
 #include "esphome/components/network/util.h"
 
+#ifdef USE_ESP32
 #include "esp_netif.h"
 #if LWIP_IPV6
 #include "lwip/netif.h"
 // default_router_list[]: lwIP keeps the ND6 default routers in a private
 // table with no public accessor. ESP-IDF ships the header.
 #include "lwip/priv/nd6_priv.h"
+#endif
+#else  // USE_ESP8266
+#include "lwip/icmp.h"
+#include "lwip/inet_chksum.h"
+#include "lwip/netif.h"
+#include "lwip/pbuf.h"
+#include "lwip/prot/ip4.h"
+#include "lwip/raw.h"
 #endif
 
 namespace esphome {
@@ -52,6 +61,7 @@ static inline uint32_t elapsed_ms(uint32_t now, uint32_t then) {
   return d < 0 ? 0 : static_cast<uint32_t>(d);
 }
 
+#ifdef USE_ESP32
 #if LWIP_IPV6
 static bool netif_has_index(esp_netif_t *netif, void *ctx) {
   return (uint32_t) esp_netif_get_netif_impl_index(netif) == *static_cast<uint32_t *>(ctx);
@@ -106,6 +116,7 @@ static void ping_timeout_cb(esp_ping_handle_t hdl, void *args) {
     return;
   ctx->self->on_timeout();
 }
+#endif  // USE_ESP32
 
 void GatewayWatchdog::on_reply(uint32_t elapsed_ms) {
   this->last_callback_ms_ = millis();
@@ -122,6 +133,7 @@ void GatewayWatchdog::on_timeout() {
   this->timeouts_ = this->timeouts_ + 1;
 }
 
+#ifdef USE_ESP32
 bool GatewayWatchdog::resolve_target_(ip_addr_t *out, uint32_t *ifindex) {
   *ifindex = 0;
   // esp_netif_get_default_netif() rather than a hardcoded "WIFI_STA_DEF"
@@ -235,21 +247,7 @@ bool GatewayWatchdog::resolve_target_(ip_addr_t *out, uint32_t *ifindex) {
   return false;
 }
 
-void GatewayWatchdog::stop_session_() {
-  // Withdraw it from the ping task first, so nothing it delivers from here on
-  // counts.
-  this->live_session_.store(0);
-  if (this->handle_ != nullptr) {
-    esp_ping_stop(this->handle_);
-    esp_ping_delete_session(this->handle_);
-    this->handle_ = nullptr;
-  }
-  this->armed_ = false;
-}
-
-bool GatewayWatchdog::start_session_(const ip_addr_t &addr, uint32_t ifindex) {
-  this->stop_session_();
-
+bool GatewayWatchdog::open_session_(const ip_addr_t &addr, uint32_t ifindex, uint32_t session) {
   // esp_ping picks ICMP or ICMPv6 from the address type.
   esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
   cfg.target_addr = addr;
@@ -268,10 +266,6 @@ bool GatewayWatchdog::start_session_(const ip_addr_t &addr, uint32_t ifindex) {
   cfg.interval_ms = this->ping_interval_;
   cfg.timeout_ms = this->ping_timeout_;
 
-  // Never 0, which means "no session".
-  if (++this->next_session_ == 0)
-    this->next_session_ = 1;
-  const uint32_t session = this->next_session_;
   PingContext &ctx = this->ping_contexts_[session % this->ping_contexts_.size()];
   ctx.self = this;
   ctx.session.store(session);
@@ -296,9 +290,160 @@ bool GatewayWatchdog::start_session_(const ip_addr_t &addr, uint32_t ifindex) {
     ESP_LOGW(TAG, "esp_ping_start failed");
     return false;
   }
+  return true;
+}
 
+void GatewayWatchdog::close_session_() {
+  if (this->handle_ != nullptr) {
+    esp_ping_stop(this->handle_);
+    esp_ping_delete_session(this->handle_);
+    this->handle_ = nullptr;
+  }
+}
+
+bool GatewayWatchdog::session_open_() const { return this->handle_ != nullptr; }
+
+// esp_ping runs its own task; there is nothing to drive from loop().
+void GatewayWatchdog::ping_tick_(uint32_t now) {}
+
+#else  // USE_ESP8266
+
+// IPv4 only: the ESP8266 build has no IPv6 router discovery to fall back on,
+// and __init__.py rejects IPv6 targets and prefix_router there.
+bool GatewayWatchdog::resolve_target_(ip_addr_t *out, uint32_t *ifindex) {
+  *ifindex = 0;
+  if (this->target_str_ != nullptr)
+    return ipaddr_aton(this->target_str_, out) == 1;
+  // netif_default is the station interface whenever the node is connected,
+  // which loop() has checked before getting here.
+  if (netif_default == nullptr)
+    return false;
+  const ip4_addr_t *gw = netif_ip4_gw(netif_default);
+  if (gw == nullptr || ip4_addr_isany(gw))
+    return false;
+  ip_addr_copy_from_ip4(*out, *gw);
+  return true;
+}
+
+// Bytes of payload after the 8-byte echo header, as esp_ping sends.
+static const uint16_t ECHO_PAYLOAD = 32;
+
+// lwIP hands a raw IPv4 socket every ICMP packet, IP header included, before
+// its own ICMP code sees it. Keep only replies to this session's echo
+// requests (return 1: consumed) and pass everything else on (return 0) -
+// eating an echo REQUEST here would stop the node answering pings itself.
+uint8_t gateway_watchdog_raw_recv(void *arg, raw_pcb *pcb, pbuf *p, const ip_addr_t *addr) {
+  auto *self = static_cast<GatewayWatchdog *>(arg);
+  if (p->tot_len < IP_HLEN)
+    return 0;
+  const auto *iph = static_cast<const ip_hdr *>(p->payload);
+  struct icmp_echo_hdr echo;
+  if (pbuf_copy_partial(p, &echo, sizeof(echo), IPH_HL_BYTES(iph)) != sizeof(echo))
+    return 0;
+  if (ICMPH_TYPE(&echo) != ICMP_ER || lwip_ntohs(echo.id) != self->echo_id_ ||
+      !ip_addr_cmp(addr, &self->target_addr_))
+    return 0;
+  // Ours. A late reply to an earlier request is dropped; it is not this one.
+  if (self->echo_outstanding_ && lwip_ntohs(echo.seqno) == self->echo_seq_) {
+    self->echo_outstanding_ = false;
+    self->on_reply(millis() - self->echo_sent_ms_);
+  }
+  pbuf_free(p);
+  return 1;
+}
+
+bool GatewayWatchdog::open_session_(const ip_addr_t &addr, uint32_t ifindex, uint32_t session) {
+  this->pcb_ = raw_new(IP_PROTO_ICMP);
+  if (this->pcb_ == nullptr) {
+    ESP_LOGW(TAG, "raw_new failed");
+    return false;
+  }
+  raw_recv(this->pcb_, gateway_watchdog_raw_recv, this);
+  // The session number is the echo identifier: different for every session,
+  // which is how a reply to a closed one is told apart.
+  this->echo_id_ = static_cast<uint16_t>(session);
+  this->echo_seq_ = 0;
+  this->echo_outstanding_ = false;
+  this->sent_once_ = false;
+  // There is no other thread here, so the session is live at once.
+  this->live_session_.store(session);
+  return true;
+}
+
+void GatewayWatchdog::close_session_() {
+  if (this->pcb_ != nullptr) {
+    raw_remove(this->pcb_);
+    this->pcb_ = nullptr;
+  }
+  this->echo_outstanding_ = false;
+}
+
+bool GatewayWatchdog::session_open_() const { return this->pcb_ != nullptr; }
+
+// What esp_ping's task does on the ESP32: one echo request per ping
+// interval, and a timeout for any not answered within ping_timeout.
+void GatewayWatchdog::ping_tick_(uint32_t now) {
+  if (this->pcb_ == nullptr)
+    return;
+  if (this->echo_outstanding_ && elapsed_ms(now, this->echo_sent_ms_) >= this->ping_timeout_) {
+    this->echo_outstanding_ = false;
+    this->on_timeout();
+  }
+  if (this->echo_outstanding_ || (this->sent_once_ && elapsed_ms(now, this->last_send_ms_) < this->ping_interval_))
+    return;
+
+  this->sent_once_ = true;
+  this->last_send_ms_ = now;
+  const uint16_t len = sizeof(struct icmp_echo_hdr) + ECHO_PAYLOAD;
+  pbuf *p = pbuf_alloc(PBUF_IP, len, PBUF_RAM);
+  if (p == nullptr) {
+    // Out of memory is not the gateway's fault, but it is not a reply either.
+    this->on_timeout();
+    return;
+  }
+  auto *echo = static_cast<struct icmp_echo_hdr *>(p->payload);
+  ICMPH_TYPE_SET(echo, ICMP_ECHO);
+  ICMPH_CODE_SET(echo, 0);
+  echo->id = lwip_htons(this->echo_id_);
+  echo->seqno = lwip_htons(++this->echo_seq_);
+  auto *data = reinterpret_cast<uint8_t *>(echo) + sizeof(struct icmp_echo_hdr);
+  for (uint16_t i = 0; i < ECHO_PAYLOAD; i++)
+    data[i] = static_cast<uint8_t>(i);
+  echo->chksum = 0;
+  echo->chksum = inet_chksum(echo, len);
+  const err_t err = raw_sendto(this->pcb_, p, &this->target_addr_);
+  pbuf_free(p);
+  if (err != ERR_OK) {
+    // As esp_ping reports a request it could not send: a timeout.
+    this->on_timeout();
+    return;
+  }
+  this->echo_sent_ms_ = now;
+  this->echo_outstanding_ = true;
+}
+
+#endif  // USE_ESP8266
+
+void GatewayWatchdog::stop_session_() {
+  // Withdraw it first, so nothing delivered from here on counts.
+  this->live_session_.store(0);
+  this->close_session_();
+  this->armed_ = false;
+}
+
+bool GatewayWatchdog::start_session_(const ip_addr_t &addr, uint32_t ifindex) {
+  this->stop_session_();
+
+  // Never 0, which means "no session".
+  if (++this->next_session_ == 0)
+    this->next_session_ = 1;
+  // The target is set before the session opens: on the ESP8266 the receive
+  // callback compares against it.
   this->target_addr_ = addr;
   this->target_ifindex_ = ifindex;
+  if (!this->open_session_(addr, ifindex, this->next_session_))
+    return false;
+
   this->last_reply_ms_ = millis();
   this->last_callback_ms_ = millis();
   this->session_rebuilt_for_window_ = false;
@@ -400,11 +545,12 @@ void GatewayWatchdog::loop() {
     return;
   }
 
-  if (this->handle_ == nullptr || ifindex != this->target_ifindex_ ||
+  if (!this->session_open_() || ifindex != this->target_ifindex_ ||
       !ip_addr_cmp(&addr, &this->target_addr_)) {
     this->start_session_(addr, ifindex);
     return;
   }
+  this->ping_tick_(now);
 
   // The session should be emitting a callback every ping_interval, reply or
   // timeout. Total silence means the session died rather than the gateway.
@@ -554,4 +700,4 @@ void GatewayWatchdog::dump_config() {
 }  // namespace gateway_watchdog
 }  // namespace esphome
 
-#endif  // USE_ESP32
+#endif  // USE_ESP32 || USE_ESP8266
